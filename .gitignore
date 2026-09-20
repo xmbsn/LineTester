@@ -1,0 +1,18 @@
+# 构建产物
+bin/
+obj/
+
+# 发布产物（自包含单文件 EXE 约 160MB，不进版本库）
+publish/
+
+# 运行期数据
+logs/
+.testtmp/
+
+# 界面渲染快照（排版检查用）
+.ui-preview/
+
+# 临时/用户文件
+*.tmp
+*.user
+.vs/

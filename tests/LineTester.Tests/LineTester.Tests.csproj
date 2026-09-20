@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>LineTester.Tests</AssemblyName>
+    <RootNamespace>LineTester.Tests</RootNamespace>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+
+  <!--
+    自检宿主：本机无法访问 nuget.org，无法还原 xunit / Microsoft.NET.Test.Sdk，
+    因此这里用零依赖的控制台断言宿主：全部通过退出码 0，有失败退出码 1。
+    运行：dotnet run 指定本项目 csproj（见 README）。
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\LineTester.csproj" />
+  </ItemGroup>
+</Project>

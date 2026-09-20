@@ -1,0 +1,203 @@
+using System.IO;
+using System.Text;
+using System.Text.Encodings.Web;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Threading;
+
+namespace LineTester;
+
+public static class ConfigManager
+{
+    private static readonly JsonSerializerOptions Options = new()
+    {
+        WriteIndented = true,
+        PropertyNameCaseInsensitive = true,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        // 不把中文转义成 \uXXXX，保证现场可以直接用记事本编辑
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        AllowTrailingCommas = true,
+        ReadCommentHandling = JsonCommentHandling.Skip
+    };
+
+    /// <summary>仅测试使用：覆盖配置文件路径。</summary>
+    public static string? OverridePath { get; set; }
+
+    public static string ConfigPath =>
+        OverridePath ?? Path.Combine(AppContext.BaseDirectory, "appsettings.json");
+
+    /// <summary>文件指纹，用于检测被外部程序修改。</summary>
+    public static (DateTime WriteUtc, long Length)? Stamp()
+    {
+        try
+        {
+            var info = new FileInfo(ConfigPath);
+            return info.Exists ? (info.LastWriteTimeUtc, info.Length) : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 读取配置。不会抛异常，也不会因为解析失败而覆盖原文件。
+    /// 返回 false 时 <paramref name="error"/> 说明原因，界面应提示用户且不要自动保存。
+    /// </summary>
+    public static AppConfig Load(out string? error)
+    {
+        error = null;
+
+        try
+        {
+            if (!File.Exists(ConfigPath))
+            {
+                var fresh = AppConfig.Default();
+                try
+                {
+                    Save(fresh);
+                }
+                catch (Exception ex)
+                {
+                    error = $"无法创建配置文件：{ex.Message}";
+                }
+                return fresh;
+            }
+
+            var json = File.ReadAllText(ConfigPath, Encoding.UTF8);
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                error = "配置文件内容为空。";
+                return AppConfig.Default();
+            }
+
+            AppConfig? parsed;
+            try
+            {
+                parsed = JsonSerializer.Deserialize<AppConfig>(json, Options);
+            }
+            catch (JsonException ex)
+            {
+                error = $"配置文件 JSON 格式错误（第 {ex.LineNumber + 1} 行）：{ex.Message}";
+                return AppConfig.Default();
+            }
+
+            if (parsed is null)
+            {
+                error = "配置文件反序列化结果为空。";
+                return AppConfig.Default();
+            }
+
+            parsed.Links ??= new List<LinkConfig>();
+
+            if (!Validate(parsed, out var detail))
+                error = "配置参数无效：" + detail;
+
+            return parsed;
+        }
+        catch (Exception ex)
+        {
+            error = $"读取配置文件失败：{ex.Message}";
+            return AppConfig.Default();
+        }
+    }
+
+    /// <summary>原子写入：先写临时文件再替换，避免写一半崩溃导致配置损坏。</summary>
+    public static void Save(AppConfig config)
+    {
+        var path = ConfigPath;
+        var dir = Path.GetDirectoryName(path);
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+
+        var json = JsonSerializer.Serialize(config, Options);
+        var tmp = path + ".tmp";
+
+        try
+        {
+            WriteWithRetry(tmp, path, json);
+        }
+        catch
+        {
+            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
+            throw;
+        }
+    }
+
+    /// <summary>替换重试次数：退避间隔为 40/80/120/160/200ms，最坏约 600ms。</summary>
+    private const int MaxWriteAttempts = 6;
+
+    private static void WriteWithRetry(string tmp, string path, string json)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                File.WriteAllText(tmp, json, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+                File.Move(tmp, path, overwrite: true);
+                return;
+            }
+            catch (Exception ex) when (attempt < MaxWriteAttempts && IsTransientWriteFailure(ex))
+            {
+                // Windows 上目标文件可能被索引器/杀毒软件/记事本等瞬时占用，
+                // 表现为共享冲突或“拒绝访问”。退避重试，避免用户看到莫名其妙的“保存失败”。
+                Thread.Sleep(40 * attempt);
+            }
+        }
+    }
+
+    private static bool IsTransientWriteFailure(Exception ex)
+        => ex is IOException or UnauthorizedAccessException;
+
+    /// <summary>
+    /// 单条链路的校验规则。链路编辑器与配置文件校验共用这一份规则，
+    /// 避免界面和文件两条路径的判定不一致。
+    ///
+    /// 注意：TCP 与 UDP **都未勾选是合法的**——表示这条链路不主动探测，
+    /// 常用于纯服务端节点（只监听应答），或临时把某条链路停测而不删除配置。
+    /// </summary>
+    public static bool ValidateLink(LinkConfig link, out string error)
+    {
+        var problems = new List<string>();
+
+        if (string.IsNullOrWhiteSpace(link.Name)) problems.Add("未填写名称");
+        if (string.IsNullOrWhiteSpace(link.Host)) problems.Add("未填写主机/IP");
+        if (link.Port < 1 || link.Port > 65535) problems.Add("端口必须在 1~65535 之间");
+
+        error = string.Join("；", problems);
+        return problems.Count == 0;
+    }
+
+    public static bool Validate(AppConfig config, out string error)
+    {
+        var problems = new List<string>();
+
+        if (config.ListenPort < 1 || config.ListenPort > 65535)
+            problems.Add("ListenPort 必须在 1~65535 之间");
+        if (config.IntervalMs < 50)
+            problems.Add("IntervalMs 不能小于 50");
+        if (config.TimeoutMs < 1)
+            problems.Add("TimeoutMs 必须大于 0");
+        if (config.WarningRttMs < 0)
+            problems.Add("WarningRttMs 不能为负数");
+        if (config.StatWindowMinutes < 1)
+            problems.Add("StatWindowMinutes 不能小于 1");
+        if (config.LossWarnPercent < 0)
+            problems.Add("LossWarnPercent 不能为负数");
+        if (config.ConsecutiveLossWarn < 1)
+            problems.Add("ConsecutiveLossWarn 不能小于 1");
+        if (config.Links is not null)
+        {
+            for (var i = 0; i < config.Links.Count; i++)
+            {
+                var link = config.Links[i];
+                var label = string.IsNullOrWhiteSpace(link.Name) ? $"Links[{i}]" : $"Links[{i}]({link.Name})";
+
+                if (!ValidateLink(link, out var linkError))
+                    problems.Add($"{label}：{linkError}");
+            }
+        }
+
+        error = string.Join("；", problems);
+        return problems.Count == 0;
+    }
+}

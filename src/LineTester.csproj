@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+      <AssemblyName>LineTester</AssemblyName>
+    <RootNamespace>LineTester</RootNamespace>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+
+  <!--
+    配置文件必须随程序一起输出 / 发布。
+    否则 AppContext.BaseDirectory 下的 appsettings.json 不存在，
+    dotnet run 或发布目录会各自生成一份默认配置，仓库里的那份完全不生效。
+    PreserveNewest：程序运行中改过的输出目录副本不会被旧模板覆盖。
+  -->
+  <ItemGroup>
+    <None Include="..\appsettings.json" Link="appsettings.json"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
