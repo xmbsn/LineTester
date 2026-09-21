@@ -41,17 +41,22 @@ internal static partial class Program
         var t0 = new DateTime(2026, 9, 21, 10, 0, 0);
         const string key = "机房B|127.0.0.1|9001|TCP";
 
-        Check("没勾选时没有任何曲线", history.SelectedSeries.Count == 0);
+        // 现场反馈：**晚勾选的链路看不到勾选之前的数据**。
+        // 记录与勾选必须解耦——先喂两条数据（此时还没勾选），再勾选，这两条必须在。
+        history.Add(ChartSampleResult("机房B", "127.0.0.1", 9001, "TCP", t0, 12.5, false));
+        history.Add(ChartSampleResult("机房B", "127.0.0.1", 9001, "TCP", t0.AddSeconds(2), 13.0, false));
+
+        Check("没勾选也在记数据（晚勾选才有得看）", history.Find(key) is { Count: 2 },
+            history.Find(key)?.Count.ToString() ?? "null");
+        Check("没勾选时不显示在图上", history.SelectedSeries.Count == 0);
+        Eq("记录条数（含未勾选）用于界面说清「没曲线 ≠ 没数据」", 1, history.RecordedCount);
 
         history.Select(key, "机房B", "TCP", "127.0.0.1:9001");
         var series = history.Find(key);
-        Check("勾选后建立曲线", series is not null);
-        Eq("曲线名 = 链路名称 + 协议名称", "机房B · TCP", series!.Name);
+        Check("勾选后复用同一条曲线", series is not null);
+        Eq("勾选后立刻能看到勾选之前的那两条数据", 2, series!.Count);
+        Eq("曲线名 = 链路名称 + 协议名称", "机房B · TCP", series.Name);
         Eq("只勾一条时选中集合只有一条", 1, history.SelectedSeries.Count);
-
-        history.Add(ChartSampleResult("机房B", "127.0.0.1", 9001, "TCP", t0, 12.5, false));
-        history.Add(ChartSampleResult("机房B", "127.0.0.1", 9001, "TCP", t0.AddSeconds(2), 13.0, false));
-        Eq("勾选的曲线收到采样", 2, series.Count);
 
         // 结果按完成顺序回来，同一批里时间戳会轻微乱序；缓冲必须自己保持有序
         history.Add(ChartSampleResult("机房B", "127.0.0.1", 9001, "TCP", t0.AddSeconds(1), 11.0, false));
@@ -64,16 +69,15 @@ internal static partial class Program
         Eq("丢包数统计正确", 1, series.LostCount);
         Eq("丢包点没有 RTT 值（不会算进最大延迟）", 13.0, series.MaxRtt(t0, t0.AddSeconds(10)));
 
-        // 取消勾选：停止画、停止收，但历史留着——误点一下不该丢掉整段曲线
+        // 取消勾选：只是不画，**数据继续记、历史继续留**
         history.Deselect(key);
         history.Add(ChartSampleResult("机房B", "127.0.0.1", 9001, "TCP", t0.AddSeconds(4), 14.0, false));
-        Eq("取消勾选后不再收新数据", 4, series.Count);
+        Eq("取消勾选后仍然继续记数据（勾选只管显示）", 5, series.Count);
         Check("取消勾选的曲线不再出现在选中集合", history.SelectedSeries.Count == 0);
-        Check("取消勾选不会丢掉已有历史", series.Count == 4);
 
         history.Select(key, "机房B", "TCP", "127.0.0.1:9001");
         history.Add(ChartSampleResult("机房B", "127.0.0.1", 9001, "TCP", t0.AddSeconds(5), 15.0, false));
-        Eq("重新勾选后接着收（历史是连续的）", 5, series.Count);
+        Eq("重新勾选后历史是连续的一整段", 6, series.Count);
 
         // 会话范围：多条曲线取并集
         var other = "机房C|192.0.2.9|9001|UDP";
@@ -496,11 +500,22 @@ internal static partial class Program
                 Pump(300);
                 Check("还没勾选时提示怎么用", chart.Series.Count == 0);
 
+                // 现场反馈的回归：**晚勾选的链路必须能看到勾选之前的数据**
+                // （记录与显示必须解耦：勾选只管画不画）
+                var history = (ChartHistory)GetPrivateField(window, "_chartHistory")!;
+                var recorded = history.Find(tcpRow.Key)?.Count ?? 0;
+                Check("勾选之前就已经在记录这条链路了", recorded >= 3, recorded + " 条");
+                Check("没勾选的数据不在图上显示（但已经记着）",
+                    chart.Series.Count == 0 && history.RecordedCount > 0,
+                    $"记录 {history.RecordedCount} 条");
+
                 tcpRow.Plot = true;      // 等价于用户点了勾选框
                 Pump(3500);
 
                 Eq("勾选后出现一条曲线", 1, chart.Series.Count);
                 Check("曲线名 = 链路名称 + 协议名称", chart.Series[0].Name.StartsWith("本机 · "), chart.Series[0].Name);
+                Check("勾选后立刻包含勾选之前记录的那整段数据",
+                    chart.Series[0].Count >= recorded, $"{recorded} 条（勾选前）→ {chart.Series[0].Count} 条");
                 Check("曲线按会话全程展示（默认不缩放）", !chart.IsZoomed);
                 Check("已经开始收采样", chart.Series[0].Count >= 2, "采样数=" + chart.Series[0].Count);
 

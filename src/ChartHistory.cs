@@ -38,8 +38,11 @@ public sealed class ChartSeries
     public int Count => _samples.Count;
 
     /// <summary>
-    /// 当前是否被勾选（勾选的才画、才继续收数据）。
-    /// 取消勾选**不清历史**：误点一下不该丢掉整段曲线，重新勾上还是完整的那条。
+    /// 当前是否**显示**在图上。
+    ///
+    /// 注意：它只管显示，**不影响记录**——所有链路的数据一直都在记，
+    /// 否则"晚勾选的链路看不到勾选之前的数据"（现场反馈过这个毛病）。
+    /// 取消勾选也不清历史：误点一下不该丢掉整段曲线，重新勾上还是完整的那条。
     /// </summary>
     public bool Selected { get; set; }
 
@@ -123,11 +126,14 @@ public sealed class ChartHistory
 
     public int MaxSamplesPerSeries { get; init; } = DefaultMaxSamplesPerSeries;
 
-    /// <summary>按登记顺序排列的**全部**曲线（含取消勾选的，它们的历史留着）。</summary>
+    /// <summary>按登记顺序排列的**全部**曲线（含未勾选的，它们的数据照样在记）。</summary>
     public IReadOnlyList<ChartSeries> Series => _ordered;
 
     /// <summary>当前勾选的曲线（图例顺序、配色下标都按这个顺序，保证颜色稳定不跳）。</summary>
     public IReadOnlyList<ChartSeries> SelectedSeries => _ordered.Where(s => s.Selected).ToList();
+
+    /// <summary>已经记录到的链路条数（含没勾选的）：界面用它解释"没曲线不等于没数据"。</summary>
+    public int RecordedCount => _ordered.Count;
 
     public ChartSeries? Find(string key) => _byKey.TryGetValue(key, out var series) ? series : null;
 
@@ -152,7 +158,7 @@ public sealed class ChartHistory
         }
     }
 
-    /// <summary>勾选一条链路（第一次勾选时建立曲线）。重复勾选无副作用。</summary>
+    /// <summary>勾选一条链路（只影响**显示**；数据本来就在记）。重复勾选无副作用。</summary>
     public ChartSeries Select(string key, string linkName, string protocol, string target)
     {
         if (!_byKey.TryGetValue(key, out var series))
@@ -166,7 +172,7 @@ public sealed class ChartHistory
         return series;
     }
 
-    /// <summary>取消勾选：停止画、停止收数据，但**保留已有历史**（重新勾上还是完整一条）。</summary>
+    /// <summary>取消勾选：只是不再画，**数据继续记、历史照留**（重新勾上就是完整一条）。</summary>
     public bool Deselect(string key)
     {
         if (!_byKey.TryGetValue(key, out var series)) return false;
@@ -174,13 +180,27 @@ public sealed class ChartHistory
         return true;
     }
 
-    /// <summary>把结果写进对应曲线；没勾选的忽略——不画就不必存。</summary>
+    /// <summary>
+    /// 记一个采样。**与勾选无关**：没勾选的链路也照样记，
+    /// 这样"后来才勾选"的链路也能看到勾选之前的整段数据。
+    /// 第一次见到某条链路时自动建立曲线。
+    /// </summary>
     public void Add(ProbeResult result)
     {
-        if (_byKey.TryGetValue(result.Key, out var series) && series.Selected) series.Add(result);
+        GetOrCreate(result).Add(result);
     }
 
-    /// <summary>按当前勾选的曲线批量写入（界面每 500 毫秒取一次待处理结果时调用）。</summary>
+    private ChartSeries GetOrCreate(ProbeResult result)
+    {
+        if (_byKey.TryGetValue(result.Key, out var series)) return series;
+
+        series = new ChartSeries(result.Key, result.LinkName, result.Protocol, result.Target, MaxSamplesPerSeries);
+        _byKey[result.Key] = series;
+        _ordered.Add(series);
+        return series;
+    }
+
+    /// <summary>批量写入（界面每 500 毫秒取一次待处理结果时调用）。</summary>
     public void AddRange(IEnumerable<ProbeResult> results)
     {
         foreach (var result in results) Add(result);

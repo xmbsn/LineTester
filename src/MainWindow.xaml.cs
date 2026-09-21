@@ -957,7 +957,7 @@ public partial class MainWindow : Window
 
         // 曲线跟着会话走：采样清零，但"勾了哪几条"保留（清除后通常还要看同样几条）
         _chartHistory.Clear();
-        if (MainTabs.SelectedItem == ChartTab) ChartPanel.Update(_chartHistory.SelectedSeries, _settings.WarningRttMs);
+        if (MainTabs.SelectedItem == ChartTab) ChartPanel.Update(_chartHistory.SelectedSeries, _settings.WarningRttMs, _chartHistory.RecordedCount);
 
         while (_pending.TryDequeue(out _)) { }
     }
@@ -1566,7 +1566,7 @@ public partial class MainWindow : Window
     {
         if (MainTabs.SelectedItem != ChartTab) return;
 
-        ChartPanel.Update(_chartHistory.SelectedSeries, _settings.WarningRttMs);
+        ChartPanel.Update(_chartHistory.SelectedSeries, _settings.WarningRttMs, _chartHistory.RecordedCount);
     }
 
     /// <summary>
@@ -1589,7 +1589,7 @@ public partial class MainWindow : Window
         }
 
         // 勾选后立刻出图，不必等下一个 500 毫秒 tick
-        if (MainTabs.SelectedItem == ChartTab) ChartPanel.Update(_chartHistory.SelectedSeries, _settings.WarningRttMs);
+        if (MainTabs.SelectedItem == ChartTab) ChartPanel.Update(_chartHistory.SelectedSeries, _settings.WarningRttMs, _chartHistory.RecordedCount);
     }
 
     /// <summary>

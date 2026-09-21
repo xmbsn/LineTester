@@ -57,9 +57,10 @@ public partial class RttChartPanel : UserControl
     /// 界面每 500 毫秒调用一次：同步曲线集合、补画新数据、刷新范围文案。
     /// 只有"勾选集合"变化时才重建图例，避免每 500 毫秒重建一次控件树。
     /// </summary>
-    public void Update(IReadOnlyList<ChartSeries> series, double warningMs)
+    public void Update(IReadOnlyList<ChartSeries> series, double warningMs, int recordedCount = 0)
     {
         Chart.WarningMs = warningMs;
+        Chart.RecordedCount = recordedCount;
 
         var signature = string.Join("\u0001", series.Select(s => s.Key));
         if (signature != _signature)
@@ -70,8 +71,11 @@ public partial class RttChartPanel : UserControl
 
         Chart.SetSeries(series);
         Chart.Refresh();
+        _recordedCount = recordedCount;
         UpdateRangeText();
     }
+
+    private int _recordedCount;
 
     private void RebuildLegend(IReadOnlyList<ChartSeries> series)
     {
@@ -113,7 +117,10 @@ public partial class RttChartPanel : UserControl
 
         if (view is null || session is null)
         {
-            RangeText.Text = "尚无数据（先在「链路实时统计」页勾选链路）";
+            // 区分"没数据"和"没勾选"：数据一直在记，只是没显示
+            RangeText.Text = _recordedCount > 0
+                ? $"已记录 {_recordedCount} 条链路的数据（勾选后在图上显示，勾选之前的整段也在）"
+                : "尚无数据（启动测试后开始记录）";
             return;
         }
 

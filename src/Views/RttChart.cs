@@ -110,6 +110,12 @@ public sealed class RttChart : Control
 
     public IReadOnlyList<ChartSeries> Series => _series;
 
+    /// <summary>
+    /// 已经记录了多少条链路（含没勾选的）。界面靠它说清"没曲线 ≠ 没数据"——
+    /// 数据与勾选无关，一直在记。
+    /// </summary>
+    public int RecordedCount { get; set; }
+
     protected override int VisualChildrenCount => _layers.Count;
 
     protected override Visual GetVisualChild(int index) => _layers[index];
@@ -426,9 +432,13 @@ public sealed class RttChart : Control
 
         if (visible.Count == 0 || !_hasView)
         {
-            var hint = Text("在「链路实时统计」页勾选链路（最左侧那一列的勾选框），这里按会话全程画 RTT 曲线", 12, Subtle);
-            dc.DrawText(hint, new Point(Math.Max(8, (bounds.Width - hint.Width) / 2),
-                                        Math.Max(8, (bounds.Height - hint.Height) / 2)));
+            // 说清"没曲线 ≠ 没数据"：数据一直在记，只是没勾选
+            var hint = RecordedCount > 0
+                ? $"已记录 {RecordedCount} 条链路的数据（勾选后显示，勾选之前的整段也在）。在「链路实时统计」页最左侧的「曲线」列勾选"
+                : "在「链路实时统计」页勾选链路（最左侧那一列的勾选框），这里按会话全程画 RTT 曲线";
+            var text = Text(hint, 12, Subtle);
+            dc.DrawText(text, new Point(Math.Max(8, (bounds.Width - text.Width) / 2),
+                                        Math.Max(8, (bounds.Height - text.Height) / 2)));
             return;
         }
 
