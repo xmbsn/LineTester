@@ -87,14 +87,12 @@ public sealed class IspApiFetcher : IIspFetcher, IDisposable
             }
 
             var json = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
-            var records = JsonSerializer.Deserialize<List<IspRecord>>(json, JsonOptions) ?? new List<IspRecord>();
+            var records = TryParseBatchResponse(json);
 
-            var now = DateTime.UtcNow;
-            foreach (var record in records)
-            {
-                record.FetchedUtc = now;
-                if (string.IsNullOrWhiteSpace(record.Status)) record.Status = "fail";
-            }
+            // 内容不是我们的 JSON（被代理/门户劫持返回网页等）：按查询失败处理，
+            // **不能**当成"每个地址都无数据"缓存起来——那会把真问题掩盖成"没数据"
+            if (records is null)
+                return IspFetchResult.Failure("响应不是合法 JSON（可能被代理或上网门户劫持）");
 
             return new IspFetchResult
             {
@@ -118,6 +116,67 @@ public sealed class IspApiFetcher : IIspFetcher, IDisposable
            int.TryParse(values.FirstOrDefault(), out var value)
             ? value
             : -1;
+
+    /// <summary>
+    /// 解析批量响应。**单独抽出来是有血的教训的**：ip-api 返回的地址字段叫 <c>query</c>，
+    /// 而本地模型里叫 <c>Ip</c>——直接反序列化成 IspRecord 会得到"每条记录地址为空"，
+    /// 于是所有地址都被判成"无数据"（现场表现就是运营商信息一直显示未知）。
+    /// 假抓取器测试不经过 JSON，压根发现不了，只能靠真实接口复现 + 这个解析用例守住。
+    ///
+    /// 返回 <c>null</c> 表示这段内容不是合法 JSON（例如被劫持返回了网页），
+    /// 调用方应把它当成"查询失败"，而不是"每个地址都没数据"。
+    /// </summary>
+    public static List<IspRecord>? TryParseBatchResponse(string json)
+    {
+        List<ApiRecord>? items;
+
+        try
+        {
+            items = JsonSerializer.Deserialize<List<ApiRecord>>(json, JsonOptions);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+
+        if (items is null) return new List<IspRecord>();
+
+        var now = DateTime.UtcNow;
+        var records = new List<IspRecord>(items.Count);
+
+        foreach (var item in items)
+        {
+            if (item is null) continue;
+
+            records.Add(new IspRecord
+            {
+                Ip = (item.Query ?? "").Trim(),
+                Status = string.IsNullOrWhiteSpace(item.Status) ? "fail" : item.Status,
+                Message = item.Message ?? "",
+                Country = item.Country ?? "",
+                Isp = item.Isp ?? "",
+                Org = item.Org ?? "",
+                As = item.As ?? "",
+                AsName = item.AsName ?? "",
+                FetchedUtc = now
+            });
+        }
+
+        return records;
+    }
+
+    /// <summary>ip-api 响应的字段名（原样对齐官方文档，别改成我们自己的命名）。</summary>
+    private sealed class ApiRecord
+    {
+        public string? Query { get; set; }
+        public string? Status { get; set; }
+        public string? Message { get; set; }
+        public string? Country { get; set; }
+        public string? Isp { get; set; }
+        public string? Org { get; set; }
+        public string? As { get; set; }
+        public string? AsName { get; set; }
+    }
 
     public void Dispose() => _http.Dispose();
 }

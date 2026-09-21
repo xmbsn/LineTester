@@ -454,6 +454,9 @@ public sealed class StatRow : INotifyPropertyChanged
 
     public string Key { get; init; } = "";
     public string Name { get; init; } = "";
+
+    /// <summary>链路名（不含协议后缀）——用于把"同链路其它协议学到的本端出口 IP"复用到本行。</summary>
+    public string LinkName { get; init; } = "";
     public string Target { get; init; } = "";
 
     public string Avg { get => _avg; set => Set(ref _avg, value); }
@@ -523,7 +526,13 @@ public sealed class StatRow : INotifyPropertyChanged
     /// 由调用方根据查询状态给出"查询中…/查询失败/被限流/未启用"，
     /// 否则网络不通时这一列会永远写着"查询中…"，让人以为程序在等（实际是查不到）。
     /// </summary>
-    public void SetCarrier(Isp.IspRecord? local, Isp.IspRecord? remote, bool enabled, string pendingText = "查询中…")
+    /// <param name="exitOverride">
+    /// 本端出口地址的替代值（同链路其它协议学到的）：本行自己还没学到时用它显示，
+    /// 否则会出现"运营商是电信、地址却是 '-'"这种自相矛盾的一格。
+    /// </param>
+    public void SetCarrier(
+        Isp.IspRecord? local, Isp.IspRecord? remote, bool enabled,
+        string pendingText = "查询中…", string? exitOverride = null)
     {
         if (!enabled)
         {
@@ -542,8 +551,9 @@ public sealed class StatRow : INotifyPropertyChanged
         RemoteCarrier = remote is null ? pendingText : NameOf(remote);
 
         // SeenFrom 可能是 ""（还没探测过）或 "-"（占位），两种都按"没有地址"显示
-        var exit = string.IsNullOrWhiteSpace(SeenFrom) || SeenFrom == "-" ? "-" : SeenFrom;
-        LocalExitText = exit + " · " + LocalCarrier;
+        var exit = string.IsNullOrWhiteSpace(SeenFrom) || SeenFrom == "-" ? "" : SeenFrom;
+        if (exit.Length == 0 && !string.IsNullOrWhiteSpace(exitOverride)) exit = exitOverride!;
+        LocalExitText = (exit.Length == 0 ? "-" : exit) + " · " + LocalCarrier;
 
         CrossNetState = verdict.State switch
         {

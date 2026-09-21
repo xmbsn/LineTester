@@ -125,6 +125,7 @@ public sealed class StatSession
             rows.Add(new StatRow
             {
                 Key = key,
+                LinkName = first.LinkName,
                 Name = first.LinkName + " / " + first.Protocol,
                 Target = first.Target,
                 Avg = avg.HasValue ? $"{avg.Value:F1} ms" : "-",

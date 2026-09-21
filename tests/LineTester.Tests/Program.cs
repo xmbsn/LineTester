@@ -39,6 +39,13 @@ internal static partial class Program
             return await IspLiveAsync(args.Skip(1).ToArray());
         }
 
+        // 用真实窗口 + 真实接口复现"统计表里的运营商显示"
+        if (args.Length >= 3 && args[0] == "--isp-window" &&
+            int.TryParse(args[2], out var ispPort))
+        {
+            return IspWindowLive(args[1], ispPort);
+        }
+
         Console.WriteLine("LineTester 自检");
         Console.WriteLine(new string('=', 64));
 
@@ -69,6 +76,7 @@ internal static partial class Program
             TestRegistryMainWindowUi();
             TestNodeNameHeader();
             TestIspCarrier();
+            TestIspResponseParsing();
             TestIspLookupService();
             TestIspUi();
             TestLinkToggleWhileRunning();
@@ -995,8 +1003,10 @@ internal static partial class Program
                 Check("异常表含序号列",
                     anomalyGrid is not null && anomalyGrid.Columns.Any(c => Equals(c.Header, "序号")));
                 var statsGrid = window.FindName("StatsGrid") as DataGrid;
-                Check("统计表含“对端看到的本端地址”列",
-                    statsGrid is not null && statsGrid.Columns.Any(c => Equals(c.Header, "对端看到的本端地址")));
+                Check("统计表含「本端出口（运营商）」列（对端看到的本端地址已并入该列）",
+                    statsGrid is not null && statsGrid.Columns.Any(c => Equals(c.Header, "本端出口（运营商）")));
+                Check("统计表不再重复显示「对端看到的本端地址」列",
+                    statsGrid is not null && statsGrid.Columns.All(c => !Equals(c.Header, "对端看到的本端地址")));
                 Check("统计表含“失败原因”列",
                     statsGrid is not null && statsGrid.Columns.Any(c => Equals(c.Header, "失败原因")));
                 Check("明细表含“对端看到的源地址”列",

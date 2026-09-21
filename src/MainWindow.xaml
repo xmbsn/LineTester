@@ -404,15 +404,14 @@
                             <DataGridTextColumn Header="连续丢包" Binding="{Binding ConsecutiveLoss}" Width="82"
                                                 ElementStyle="{StaticResource NumberCell}" HeaderStyle="{StaticResource NumberHeader}"/>
                             <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="80"/>
-                            <DataGridTextColumn Header="失败原因" Binding="{Binding LastFailure}" Width="150">
+                            <!-- 「对端看到的本端地址」已合并进「本端出口（运营商）」列，不再重复显示 -->
+                            <DataGridTextColumn Header="失败原因" Binding="{Binding LastFailure}" Width="*" MinWidth="150">
                                 <DataGridTextColumn.ElementStyle>
                                     <Style TargetType="TextBlock">
                                         <Setter Property="ToolTip" Value="{Binding LastFailure}"/>
                                     </Style>
                                 </DataGridTextColumn.ElementStyle>
                             </DataGridTextColumn>
-                            <DataGridTextColumn Header="对端看到的本端地址" Binding="{Binding SeenFrom}"
-                                                Width="*" MinWidth="150"/>
                         </DataGrid.Columns>
                     </DataGrid>
 

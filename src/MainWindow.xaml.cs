@@ -98,6 +98,9 @@ public partial class MainWindow : Window
 
     private IspLookupService? _isp;
 
+    /// <summary>每条链路最近一次学到的"对端看到的本端出口地址"，供同链路其它协议复用。</summary>
+    private readonly Dictionary<string, string> _linkEgress = new(StringComparer.Ordinal);
+
     /// <summary>
     /// 探测循环每轮开始时读取的“当前会话号”。
     /// 必须每轮重新读取：若固定为启动时的值，点击“清除”后所有结果都会被当成陈旧数据丢弃，
@@ -1089,10 +1092,27 @@ public partial class MainWindow : Window
         }
 
         var remote = IspAddressRules.HostPart(row.Target);
+
+        // 本端出口 IP 来自对端回显：某个协议不通时（例如机房只映射了 UDP），
+        // 这一行拿不到 → 复用**同链路其它协议**已学到的出口 IP（同一台机器的出口通常相同），
+        // 否则 TCP 行会永远显示"未知"，而 UDP 行明明已经查到了。
         var local = IspAddressRules.HostPart(row.SeenFrom);
+        var fromFallback = false;
+        var fallbackExit = "";
+
+        if (local.Length == 0 && row.LinkName.Length > 0 &&
+            _linkEgress.TryGetValue(row.LinkName, out var known))
+        {
+            local = IspAddressRules.HostPart(known);
+            fromFallback = local.Length > 0;
+            fallbackExit = known;
+        }
 
         if (remote.Length > 0) _isp!.Request(remote);
         if (local.Length > 0 && IspAddressRules.IsPublicIp(local)) _isp!.Request(local);
+
+        // 记下这条链路学到的出口地址（带端口），供同链路其它协议复用
+        if (!fromFallback && local.Length > 0 && row.LinkName.Length > 0) _linkEgress[row.LinkName] = row.SeenFrom;
 
         IspRecord? localRecord;
         if (IspAddressRules.IsPublicIp(local))
@@ -1110,7 +1130,11 @@ public partial class MainWindow : Window
             };
         }
 
-        row.SetCarrier(localRecord, _isp!.TryGet(remote), enabled: true, PendingText());
+        row.SetCarrier(localRecord, _isp!.TryGet(remote), enabled: true, PendingText(),
+            fromFallback ? fallbackExit : null);
+
+        if (fromFallback)
+            row.CarrierDetail += $"\n（本端出口取自同链路其它协议的探测结果：{fallbackExit}）";
     }
 
     /// <summary>

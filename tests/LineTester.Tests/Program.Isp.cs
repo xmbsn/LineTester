@@ -443,8 +443,14 @@ internal static partial class Program
                 failedRow.SetCarrier(null, null, enabled: true, pendingText: "被限流…");
                 Eq("被限流时目标列写明限流", "被限流…", failedRow.RemoteCarrier);
                 Eq("本端出口列同样写出原因", "- · 被限流…", failedRow.LocalExitText);
-
                 // 目标是内网地址：本地判定，不发请求，显示"内网地址"而不是一直"查询中…"
+                // 本端出口地址的回退：本行还没学到时，用同链路其它协议学到的地址显示，
+                // 否则会出现"运营商是电信、地址却是 '-'"这种自相矛盾的一格
+                var fallbackRow = new StatRow { Key = "k3d", Name = "机房G / TCP", LinkName = "机房G", Target = "221.5.88.88:9000", SeenFrom = "-" };
+                fallbackRow.SetCarrier(Sample.TelecomShanghai, Sample.TelecomShanghai, enabled: true,
+                    exitOverride: "122.224.125.153:19488");
+                Eq("回退的本端出口参与显示", "122.224.125.153:19488 · 电信", fallbackRow.LocalExitText);
+
                 var privateRow = new StatRow { Key = "k3c", Name = "机房F / TCP", Target = "192.168.9.9:9000", SeenFrom = "-" };
                 privateRow.SetCarrier(Sample.Private, Sample.Private, enabled: true);
                 Eq("内网目标显示内网地址", "内网地址", privateRow.RemoteCarrier);
@@ -513,6 +519,145 @@ internal static partial class Program
         Console.WriteLine($"跨网判定（前两个地址）：{verdict.State} / {verdict.Short}");
         Console.WriteLine(verdict.Detail);
         return 0;
+    }
+
+    /// <summary>
+    /// 人工排查用：用**真实窗口 + 真实 ip-api** 复现"统计表里的运营商显示"。
+    /// 用法：<c>LineTester.Tests.exe --isp-window 115.231.111.101 16298</c>
+    /// </summary>
+    private static int IspWindowLive(string host, int port)
+    {
+        Console.WriteLine($"运营商显示复现：目标 {host}:{port}（真实窗口 + 真实 ip-api）");
+        Console.WriteLine(new string('-', 64));
+
+        var root = Path.Combine(AppContext.BaseDirectory, ".testtmp", "isplive_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        var previous = ConfigManager.OverridePath;
+        ConfigManager.OverridePath = Path.Combine(root, "appsettings.json");
+
+        var listen = FindBindablePort();
+        ConfigManager.Save(new AppConfig
+        {
+            ListenPort = listen,
+            IntervalMs = 500,
+            TimeoutMs = 2000,
+            Isp = new IspConfig { Enabled = true },
+            Links = { new LinkConfig { Name = "目标", Host = host, Port = port, Tcp = true, Udp = true } }
+        });
+
+        try
+        {
+            RunOnSta(() =>
+            {
+                var window = new MainWindow();
+                Console.WriteLine("运营商开关：" + (((CheckBox)window.FindName("IspCheck")!).IsChecked == true ? "已勾选" : "未勾选"));
+
+                InvokePrivateHandler(window, "Start_Click");
+                WaitUntilPump(() => ((System.Collections.IList)GetPrivateField(window, "_stats")!).Count > 0, 10000);
+                Thread.Sleep(14000); // 让后台查询跑几轮（真实接口有网络耗时）
+                Pump(600);
+
+                var rows = (System.Collections.IList)GetPrivateField(window, "_stats")!;
+                Console.WriteLine($"统计行数：{rows.Count}");
+
+                foreach (var item in rows)
+                {
+                    var row = (StatRow)item;
+                    Console.WriteLine($"  {row.Name}  目标={row.Target}");
+                    Console.WriteLine($"    目标运营商 = {row.RemoteCarrier}");
+                    Console.WriteLine($"    本端出口   = {row.LocalExitText}");
+                    Console.WriteLine($"    跨网       = {row.CrossNetState} / {row.CrossNetText}");
+                    foreach (var line in row.CarrierDetail.Split('\n')) Console.WriteLine("      " + line);
+                }
+
+                Console.WriteLine("状态行：" + ((TextBlock)window.FindName("IspNote")!).Text);
+
+                if (GetPrivateField(window, "_isp") is IspLookupService service)
+                {
+                    var status = service.Status;
+                    Console.WriteLine($"查询服务：启用={service.Enabled} 缓存={status.Cached} 待查={status.Pending} " +
+                                      $"限流={status.Throttled} 最近失败={status.LastError ?? "无"}");
+                    foreach (var record in service.Cache.Snapshot())
+                        Console.WriteLine($"    缓存 {record.Ip} → {record.Status}/{record.Message} isp={record.Isp} as={record.As}");
+                }
+                else
+                {
+                    Console.WriteLine("查询服务：**未创建**（这就是不显示运营商的原因）");
+                }
+
+                InvokePrivateHandler(window, "Stop_Click");
+                window.Close();
+            }, "运营商显示复现");
+        }
+        finally
+        {
+            ConfigManager.OverridePath = previous;
+            try { Directory.Delete(root, true); } catch { }
+        }
+
+        return 0;
+    }
+
+    // ---------------- 真实响应解析（踩过的坑） ----------------
+
+    /// <summary>
+    /// 用**真实抓下来的 ip-api 响应**验证解析。
+    ///
+    /// 坑：ip-api 的地址字段叫 <c>query</c>，本地模型叫 <c>Ip</c>。直接反序列化到 IspRecord
+    /// 会得到"每条记录地址为空"→ 全部落进"无数据"→ 界面上运营商永远显示未知。
+    /// 假抓取器不经过 JSON 所以测不出来，必须用真实报文钉住。
+    /// </summary>
+    private static void TestIspResponseParsing()
+    {
+        Section("运营商查询：真实响应解析（query ≠ Ip 的坑）");
+
+        const string realSingle =
+            """{"status":"success","country":"中国","isp":"Chinanet","org":"Massive hangzhou network technology co., LTD","as":"AS4134 CHINANET BACKBONE","asname":"CHINANET-BACKBONE","query":"115.231.111.101"}""";
+
+        var one = IspApiFetcher.TryParseBatchResponse("[" + realSingle + "]")!;
+        Eq("解析出 1 条记录", 1, one.Count);
+        Eq("地址取自 query 字段（不是空串）", "115.231.111.101", one[0].Ip);
+        Eq("isp 解析", "Chinanet", one[0].Isp);
+        Eq("org 解析", "Massive hangzhou network technology co., LTD", one[0].Org);
+        Eq("as 解析", "AS4134 CHINANET BACKBONE", one[0].As);
+        Eq("asname 解析", "CHINANET-BACKBONE", one[0].AsName);
+        Eq("AS 号", "AS4134", one[0].AsNumber);
+        Check("成功记录被标记为 Ok", one[0].Ok);
+        Eq("国别用中文（lang=zh-CN）", "中国", one[0].Country);
+        Eq("归类为电信", "电信", Name(one[0]));
+        Eq("归类大类", CarrierKind.Telecom, IspCarrier.Classify(one[0], out _));
+
+        // 真实的内网响应（单查 192.168.1.1 抓到的原文）
+        var privateReply = IspApiFetcher.TryParseBatchResponse(
+            """[{"status":"fail","message":"private range","query":"192.168.1.1"}]""")!;
+        Eq("失败响应同样带地址", "192.168.1.1", privateReply[0].Ip);
+        Check("失败响应不是 Ok", !privateReply[0].Ok);
+        Eq("内网地址展示", "内网地址", Name(privateReply[0]));
+
+        // 真实批量响应（两个地址）
+        var batch = IspApiFetcher.TryParseBatchResponse(
+            """
+            [{"status":"success","country":"中国","isp":"CNC Group CHINA169 Guangdong Province Network","org":"CHINA UNICOM","as":"AS17816 China Unicom IP network China169 Guangdong province","asname":"CHINA169-GZ","query":"221.5.88.88"},
+             {"status":"success","country":"中国","isp":"China Telecom (Group)","org":"China Telecom","as":"AS4812 China Telecom (Group)","asname":"CHINANET-SH-AP","query":"202.96.209.133"}]
+            """)!;
+        Eq("批量解析出 2 条", 2, batch.Count);
+        Eq("第一条地址", "221.5.88.88", batch[0].Ip);
+        Eq("第二条地址", "202.96.209.133", batch[1].Ip);
+        Eq("老网通资源判成联通", "联通", Name(batch[0]));
+        Eq("两条判定为跨运营商", CrossNetState.Cross, IspCarrier.Compare(batch[0], batch[1]).State);
+
+        // 字段名大小写不敏感（服务端个别网关会改大小写）
+        var upper = IspApiFetcher.TryParseBatchResponse("""[{"Status":"success","Query":"1.2.3.4","ISP":"X"}]""")!;
+        Eq("大小写不敏感", "1.2.3.4", upper[0].Ip);
+        Check("状态也认出来", upper[0].Ok);
+
+        // 空数组 / 坏 JSON：不能抛
+        Eq("空数组不抛", 0, IspApiFetcher.TryParseBatchResponse("[]")!.Count);
+        Check("坏 JSON 返回 null（按查询失败处理，不当成每个地址都无数据）",
+            IspApiFetcher.TryParseBatchResponse("not json") is null);
+        Check("被劫持返回网页也能识别出来",
+            IspApiFetcher.TryParseBatchResponse("<html><body>login</body></html>") is null);
     }
 
     /// <summary>假抓取器：记录收到的批量请求，按需返回预设结果。</summary>
