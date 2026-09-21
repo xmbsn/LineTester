@@ -7,7 +7,7 @@
 > 链路编辑器（含防误删）、界面重排、报文带对端源地址、失败原因分类、日志按天滚动 → 上传 GitHub（private）；
 > ② **链路注册协议 v1（多机房自动互测）** 全流程落地：规格 → 计划 → 三个切片（端口分流与中心服务、
 > 客户端同步循环与三节点端到端、注册设置页与中心节点管理 + 链路页联动），规格 §12 兼容矩阵逐行验证。
-> 自检从 **0 → 752 项断言**，全程 `0 警告 0 错误`。
+> 自检从 **0 → 771 项断言**，全程 `0 警告 0 错误`。
 
 ---
 
@@ -15,7 +15,7 @@
 
 > 读取 `E:\dsh\LineTester\LineTester.md`（本文件）与 `README.md`，然后：
 > ① `dotnet build .\LineTester.sln -c Release` 确认可编译（应为 0 警告 0 错误）；
-> ② `dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release` 跑自检（应 752/752 通过）；
+> ② `dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release` 跑自检（应 771/771 通过）；
 > ③ 改任何代码前先看本文件 **§4 关键设计约定** 与 **§5 本机环境坑**（这两节能避免重复踩坑）；
 > ④ 改注册协议/注册页前**先读 `docs/REGISTRY-PROTOCOL.md`**（协议契约的 SSOT，实现期修正已回写）。
 > 注意：**测试工程不在 .sln 里**（本机 SDK 损坏，见 §5.2），必须按路径构建/运行。
@@ -57,7 +57,7 @@
 | `src/Registry/RegistryUiText.cs` | 注册相关文案（连接状态/地址核对/分发状态/节点状态）——**不引用 WPF** |
 | `src/Views/RegistryPanel.xaml(.cs)` | 「注册中心」标签页（本节点/注册中心/状态/中心管理四区） |
 | `src/Views/RegistryNodeRow.cs` | 中心节点表的一行（分发勾选写中心侧 `centerHidden`）——**不引用 WPF** |
-| `tests/LineTester.Tests/Program*.cs` | 零依赖自检宿主（752 项断言，含真实回环网络、真实窗口端到端、注册协议与注册页） |
+| `tests/LineTester.Tests/Program*.cs` | 零依赖自检宿主（771 项断言，含真实回环网络、真实窗口端到端、注册协议与注册页） |
 
 ---
 
@@ -270,7 +270,8 @@ git -c http.sslBackend=openssl -c http.proxy=http://127.0.0.1:17895 -c https.pro
 ## 8. 本次会话的验证证据
 
 - `dotnet build .\LineTester.sln -c Release` → **0 警告 0 错误**（每次改动后均重跑）
-- 自检 **757/757 通过**；T14 收尾时连续 **10 次** `exit=0`（此前 5 次、3 次批次同样全绿）
+- 自检 **771/771 通过**；每个切片后都跑过连跑批次（切片 3 后 5 次、T14 后 10 次与 6 次），全部 `exit=0`
+- 验收 A1–A13 逐条有用例（规格 §13.1「验收 → 证据映射」）；A3/A12 在 T14 补了显式用例
 - 发布：`dotnet publish … -r win-x64 --self-contained … -o .\publish` → `publish\LineTester.exe`（约 162 MB，含新模板 `appsettings.json`）
 - 渲染 + 排版审查通过：非法行确实标红、校验列给出原因、静态区域无文本裁剪/越界、**注册页在真实窗口里无横向裁剪**
 - 兼容矩阵逐行证据（见 §7 第一条）；注册三节点端到端（同进程 3 个真实 `ProbeServer`）覆盖自动生成链路、中心删除传播、离线重连后消失、中心不可达不影响探测
