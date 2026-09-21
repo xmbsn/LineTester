@@ -39,11 +39,11 @@ internal static partial class Program
             return await IspLiveAsync(args.Skip(1).ToArray());
         }
 
-        // 用真实窗口 + 真实接口复现"统计表里的运营商显示"
+        // 用真实窗口 + 真实接口复现"统计表里的运营商显示"（可加 --poison 预置坏缓存）
         if (args.Length >= 3 && args[0] == "--isp-window" &&
             int.TryParse(args[2], out var ispPort))
         {
-            return IspWindowLive(args[1], ispPort);
+            return IspWindowLive(args[1], ispPort, args.Any(a => a == "--poison"));
         }
 
         Console.WriteLine("LineTester 自检");
@@ -77,6 +77,7 @@ internal static partial class Program
             TestNodeNameHeader();
             TestIspCarrier();
             TestIspResponseParsing();
+            TestIspCacheSelfHealing();
             TestIspLookupService();
             TestIspUi();
             TestLinkToggleWhileRunning();

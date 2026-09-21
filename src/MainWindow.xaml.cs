@@ -1075,6 +1075,30 @@ public partial class MainWindow : Window
         => ApplyIspSetting(IspCheck.IsChecked == true);
 
     /// <summary>
+    /// 「重查」：清掉本地运营商缓存并立刻重新查询。
+    ///
+    /// 现场必需——曾经因为解析 bug 把"无数据"写进 30 天缓存，修好程序后界面照旧显示未知，
+    /// 而运维无从下手（既不知道该删哪个文件，也不知道要等 30 天）。现在一键重来。
+    /// </summary>
+    private void IspRefresh_Click(object sender, RoutedEventArgs e)
+    {
+        if (IspCheck.IsChecked != true)
+        {
+            UpdateStatus("运营商查询未启用：先勾选「显示运营商信息并判断是否跨运营商」");
+            return;
+        }
+
+        StartIspLookup();
+        var removed = _isp?.ClearCache() ?? 0;
+
+        _linkEgress.Clear();
+        foreach (var row in _statRows.Values) row.SetCarrier(null, null, enabled: true);
+
+        UpdateStatus($"已清除运营商缓存（{removed} 条），正在重新查询…");
+        RefreshStatusBar();
+    }
+
+    /// <summary>
     /// 给一行统计补上"本端 / 目标运营商"与跨网结论。
     ///
     /// 目标：优先用探测实际看到的地址；没有就用链路配置里的主机名（由查询服务解析，结果带缓存）。

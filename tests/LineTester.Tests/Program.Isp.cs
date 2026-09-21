@@ -525,9 +525,10 @@ internal static partial class Program
     /// 人工排查用：用**真实窗口 + 真实 ip-api** 复现"统计表里的运营商显示"。
     /// 用法：<c>LineTester.Tests.exe --isp-window 115.231.111.101 16298</c>
     /// </summary>
-    private static int IspWindowLive(string host, int port)
+    private static int IspWindowLive(string host, int port, bool poisonCache = false)
     {
-        Console.WriteLine($"运营商显示复现：目标 {host}:{port}（真实窗口 + 真实 ip-api）");
+        Console.WriteLine($"运营商显示复现：目标 {host}:{port}（真实窗口 + 真实 ip-api）" +
+                          (poisonCache ? "【并预置坏缓存】" : ""));
         Console.WriteLine(new string('-', 64));
 
         var root = Path.Combine(AppContext.BaseDirectory, ".testtmp", "isplive_" + Guid.NewGuid().ToString("N"));
@@ -535,6 +536,17 @@ internal static partial class Program
 
         var previous = ConfigManager.OverridePath;
         ConfigManager.OverridePath = Path.Combine(root, "appsettings.json");
+
+        // 复现现场：旧版本（裸数组）留下的"无数据"坏缓存，TTL 30 天
+        if (poisonCache)
+        {
+            File.WriteAllText(Path.Combine(root, "ip-isp-cache.json"), $$"""
+            [
+              {"Ip":"{{host}}","Status":"fail","Message":"无数据","Country":"","Isp":"","Org":"","As":"","AsName":"","FetchedUtc":"{{DateTime.UtcNow:yyyy-MM-ddTHH:mm:ssZ}}"}
+            ]
+            """, new System.Text.UTF8Encoding(false));
+            Console.WriteLine("已预置旧格式坏缓存（fail/无数据）");
+        }
 
         var listen = FindBindablePort();
         ConfigManager.Save(new AppConfig
@@ -658,6 +670,112 @@ internal static partial class Program
             IspApiFetcher.TryParseBatchResponse("not json") is null);
         Check("被劫持返回网页也能识别出来",
             IspApiFetcher.TryParseBatchResponse("<html><body>login</body></html>") is null);
+    }
+
+    // ---------------- 缓存自愈（现场踩过的坑） ----------------
+
+    /// <summary>
+    /// 现场真事：解析 bug 把"无数据"当成事实写进了 30 天缓存 → 修好解析后程序**先读缓存**，
+    /// 界面照旧显示未知，用户看到的就是"改了还是没改好"。
+    /// 因此：缓存带 schema 版本（形状/版本不符整份丢弃）、坏记录单独丢弃、并提供一键重查。
+    /// </summary>
+    private static void TestIspCacheSelfHealing()
+    {
+        Section("运营商缓存：坏数据自愈（schema 版本 / 丢弃坏记录 / 一键清空）");
+
+        var root = Path.Combine(AppContext.BaseDirectory, ".testtmp", "ispcache_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        // ① 旧版本（裸数组）写下来的坏缓存 —— 正是现场 publish\ip-isp-cache.json 的样子
+        var oldPath = Path.Combine(root, "old-format.json");
+        File.WriteAllText(oldPath, """
+        [
+          {"Ip":"115.231.111.101","Status":"fail","Message":"无数据","Country":"","Isp":"","Org":"","As":"","AsName":"","FetchedUtc":"2026-09-21T04:24:06.779193Z"},
+          {"Ip":"122.224.125.153","Status":"fail","Message":"无数据","Country":"","Isp":"","Org":"","As":"","AsName":"","FetchedUtc":"2026-09-21T04:24:06.7792159Z"}
+        ]
+        """, new System.Text.UTF8Encoding(false));
+
+        var oldStore = new IspCacheStore(oldPath, TimeSpan.FromDays(30));
+        Eq("旧格式（裸数组）缓存整份丢弃", 0, oldStore.Count);
+        Check("坏记录不会再被当成已知结果", !oldStore.TryGet("115.231.111.101", out _));
+
+        // ② 新格式文件里混进了坏记录（status=success 但 isp/as 全空，或"无数据"）→ 单条丢弃
+        var mixedPath = Path.Combine(root, "mixed.json");
+        File.WriteAllText(mixedPath, """
+        {
+          "Schema": 2,
+          "Records": [
+            {"Ip":"115.231.111.101","Status":"fail","Message":"无数据","Isp":"","As":"","FetchedUtc":"2026-09-21T04:24:00Z"},
+            {"Ip":"202.96.209.133","Status":"success","Message":"","Isp":"","As":"","FetchedUtc":"2026-09-21T04:24:00Z"},
+            {"Ip":"221.5.88.88","Status":"success","Isp":"CNC Group CHINA169","As":"AS17816 China Unicom","FetchedUtc":"2026-09-21T04:24:00Z"},
+            {"Ip":"192.168.1.1","Status":"fail","Message":"private range","Isp":"","As":"","FetchedUtc":"2026-09-21T04:24:00Z"}
+          ]
+        }
+        """, new System.Text.UTF8Encoding(false));
+
+        var mixedStore = new IspCacheStore(mixedPath, TimeSpan.FromDays(30));
+        Eq("只留下可信的两条（坏记录与空白 success 被丢弃）", 2, mixedStore.Count);
+        Check("「无数据」记录被丢弃", !mixedStore.TryGet("115.231.111.101", out _));
+        Check("空的 success 记录被丢弃", !mixedStore.TryGet("202.96.209.133", out _));
+        Check("正常记录保留", mixedStore.TryGet("221.5.88.88", out var kept) && kept.Isp.Contains("CHINA169"));
+        Check("内网事实保留（它是有效结论，不是坏数据）", mixedStore.TryGet("192.168.1.1", out var priv) && priv.Message == "private range");
+
+        // ③ 版本号不符（将来改字段口径）→ 整份丢弃，不需要人工删文件
+        var futurePath = Path.Combine(root, "future.json");
+        File.WriteAllText(futurePath, """
+        {"Schema":99,"Records":[{"Ip":"1.2.3.4","Status":"success","Isp":"X","As":"AS1 X","FetchedUtc":"2026-09-21T04:24:00Z"}]}
+        """, new System.Text.UTF8Encoding(false));
+        Eq("版本不符整份丢弃", 0, new IspCacheStore(futurePath, TimeSpan.FromDays(30)).Count);
+
+        // ④ 保存后的文件带 schema 版本，且能正常读回
+        var roundPath = Path.Combine(root, "round.json");
+        var saveStore = new IspCacheStore(roundPath, TimeSpan.FromDays(30));
+        saveStore.Put(new IspRecord
+        {
+            Ip = "221.5.88.88", Status = "success", Isp = "CNC Group CHINA169",
+            As = "AS17816 China Unicom", Country = "中国", FetchedUtc = DateTime.UtcNow
+        });
+        Check("保存成功", saveStore.Save());
+        Check("文件里带 schema 版本", File.ReadAllText(roundPath).Contains("\"Schema\": 2"));
+        var reloaded = new IspCacheStore(roundPath, TimeSpan.FromDays(30));
+        Eq("新格式可正常读回", 1, reloaded.Count);
+
+        // ⑤ 一键清空（界面「重查」按钮走的就是它）：记录与文件一起清掉
+        Eq("清空返回条数", 1, reloaded.Clear());
+        Eq("清空后缓存为空", 0, reloaded.Count);
+        Check("清空后缓存文件被删除", !File.Exists(roundPath));
+
+        // ⑥ 服务层：坏缓存被丢弃后能重新查到；服务端没返回的地址**不缓存**（只安排重试）
+        var servicePath = Path.Combine(root, "service.json");
+        File.WriteAllText(servicePath, """
+        [{"Ip":"202.96.209.133","Status":"fail","Message":"无数据","Isp":"","As":"","FetchedUtc":"2026-09-21T04:24:00Z"}]
+        """, new System.Text.UTF8Encoding(false));
+
+        var fetcher = new FakeFetcher();
+        var config = new IspConfig { Enabled = true };
+        var serviceCache = new IspCacheStore(servicePath, TimeSpan.FromDays(30));
+
+        using (var service = new IspLookupService(config, serviceCache, fetcher))
+        {
+            service.Request("202.96.209.133");
+            fetcher.WaitForCalls(1);
+            WaitUntil(() => service.TryGet("202.96.209.133") is not null, 5000);
+            Check("旧坏缓存被丢弃后会重新查询到结果",
+                service.TryGet("202.96.209.133") is { Status: "success" },
+                service.TryGet("202.96.209.133")?.Status);
+
+            // 假抓取器不回答这个地址 → 必须"不缓存 + 报出来 + 安排重试"，而不是写成 30 天的"无数据"
+            service.Request("8.8.8.8");
+            WaitUntil(() => service.Status.LastError?.Contains("没有返回结果") == true, 5000);
+            Check("服务端没返回的地址不会被缓存成事实", service.TryGet("8.8.8.8") is null);
+            Check("并且会把情况报到状态上",
+                service.Status.LastError?.Contains("没有返回结果") == true, service.Status.LastError);
+
+            Eq("ClearCache 返回条数", 1, service.ClearCache());
+            Check("清空后立刻回到未缓存状态", service.TryGet("202.96.209.133") is null);
+        }
+
+        try { Directory.Delete(root, true); } catch { }
     }
 
     /// <summary>假抓取器：记录收到的批量请求，按需返回预设结果。</summary>

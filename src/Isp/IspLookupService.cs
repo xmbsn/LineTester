@@ -94,6 +94,26 @@ public sealed class IspLookupService : IDisposable
         return value.Length == 0 ? null : _cache.TryGet(value, out var record) ? record : null;
     }
 
+    /// <summary>
+    /// 清空缓存并让所有地址重新查询（界面上的「重查」按钮）。返回清掉的条数。
+    /// 运维不必知道缓存文件在哪，也不需要等 30 天 TTL 过期。
+    /// </summary>
+    public int ClearCache()
+    {
+        lock (_gate)
+        {
+            _retryAfter.Clear();
+            _resolvedHosts.Clear();
+        }
+
+        _nextAttemptUtc = DateTime.MinValue;
+        _backoffSeconds = 15;
+        Status.ThrottledUntilUtc = null;
+        Status.LastError = null;
+
+        return _cache.Clear();
+    }
+
     /// <summary>把缓存里已知的地址记为"已尝试"，用于界面上仍为未知的地址。</summary>
     private async Task LoopAsync(CancellationToken ct)
     {
@@ -206,16 +226,22 @@ public sealed class IspLookupService : IDisposable
 
         foreach (var record in result.Records) _cache.Put(record);
 
-        // 中心返回的记录里没有的地址（理论上不该发生）：按失败处理，避免卡在"查询中"
+        // 响应里没有的地址（例如服务端只回了部分）**不能当成既定事实缓存 30 天**——
+        // 曾经就是"无数据"被写进缓存，修好解析后界面照旧显示未知。
+        // 这里只安排稍后重试，并把情况报到状态上。
         var returned = result.Records.Select(r => r.Ip).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        foreach (var ip in toFetch.Where(ip => !returned.Contains(ip)))
+        var missing = toFetch.Where(ip => !returned.Contains(ip)).ToList();
+        if (missing.Count > 0)
         {
-            _cache.Put(new IspRecord { Ip = ip, Status = "fail", Message = "无数据", FetchedUtc = DateTime.UtcNow });
+            MarkRetry(missing);
+            Status.LastError = $"{missing.Count} 个地址没有返回结果（稍后重试）";
         }
 
         Status.LastSuccessUtc = DateTime.UtcNow;
-        Status.LastError = null;
         Status.Cached = _cache.Count;
+
+        // "有地址没返回结果"的提示要留住（上面刚写的 LastError 不能被这句覆盖）
+        if (missing.Count == 0) Status.LastError = null;
 
         // 额度用尽 → 按 X-Ttl 停手（免费版超限会被封 1 小时）
         if (result.Remaining == 0 && result.ResetAfterSeconds > 0)

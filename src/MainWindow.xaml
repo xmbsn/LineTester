@@ -278,12 +278,17 @@
                     </StackPanel>
                 </Grid>
 
-                <CheckBox Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="9" x:Name="IspCheck"
+                <CheckBox Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="8" x:Name="IspCheck"
                           Style="{StaticResource FieldCheck}" Margin="0,10,0,0"
                           HorizontalAlignment="Left" IsChecked="True"
                           Checked="IspCheck_Changed" Unchecked="IspCheck_Changed"
                           Content="显示运营商信息并判断是否跨运营商（联网查询 ip-api.com，可关闭）"
                           ToolTip="查本端出口 IP 与目标地址的运营商：同运营商=绿灯、跨运营商=红灯、数据不足=灰灯。免费接口只支持 HTTP 明文、15 次/分钟，因此结果会缓存（默认 30 天）且只查公网地址；取消勾选后程序一个字节都不会往外发。"/>
+
+                <Button Grid.Row="2" Grid.Column="8" x:Name="IspRefreshButton" Content="重查"
+                        Style="{StaticResource BaseButton}" Margin="8,6,0,0" HorizontalAlignment="Left"
+                        MinWidth="64" Padding="10,4" Click="IspRefresh_Click"
+                        ToolTip="清掉本地运营商缓存并立刻重新查询（换了网络/改了目标/怀疑结果不对时用）"/>
             </Grid>
         </Border>
 
