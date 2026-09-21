@@ -362,6 +362,17 @@
                         <DataGrid.Columns>
                             <!-- 顺序原则：**测试结果优先**，运营商与跨网结论放最后。
                                  列宽总和刻意压在默认窗口宽度内（自检里有断言守着），否则最后一列会被挤出可视区。 -->
+                            <DataGridCheckBoxColumn Header="曲线" Width="42"
+                                                    Binding="{Binding Plot, UpdateSourceTrigger=PropertyChanged}"
+                                                    HeaderStyle="{StaticResource NumberHeader}">
+                                <DataGridCheckBoxColumn.ElementStyle>
+                                    <Style TargetType="CheckBox">
+                                        <Setter Property="HorizontalAlignment" Value="Center"/>
+                                        <Setter Property="VerticalAlignment" Value="Center"/>
+                                        <Setter Property="ToolTip" Value="勾选后到「RTT 曲线」页看这条链路的曲线（可多选）"/>
+                                    </Style>
+                                </DataGridCheckBoxColumn.ElementStyle>
+                            </DataGridCheckBoxColumn>
                             <DataGridTextColumn Header="链路" Binding="{Binding Name}" Width="120"/>
                             <DataGridTextColumn Header="目标" Binding="{Binding Target}" Width="130"/>
                             <DataGridTextColumn Header="平均RTT" Binding="{Binding Avg}" Width="78"
@@ -422,6 +433,10 @@
                     <TextBlock x:Name="IspNote" Grid.Row="1" Margin="2,6,0,0" Foreground="#5F6368"
                                TextWrapping="Wrap" Visibility="Collapsed"/>
                 </Grid>
+            </TabItem>
+
+            <TabItem x:Name="ChartTab" Header="RTT 曲线">
+                <views:RttChartPanel x:Name="ChartPanel"/>
             </TabItem>
 
             <TabItem Header="异常记录（本会话）">

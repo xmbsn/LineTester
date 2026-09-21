@@ -577,6 +577,24 @@ public sealed class StatRow : INotifyPropertyChanged
     public string Key { get; init; } = "";
     public string Name { get; init; } = "";
 
+    /// <summary>协议名（"TCP"/"UDP"/"ICMP"）——从统计键 <c>链路名|主机|端口|协议</c> 的末段取。</summary>
+    public string Protocol
+    {
+        get
+        {
+            var parts = Key.Split('|');
+            return parts.Length >= 4 ? parts[^1] : "";
+        }
+    }
+
+    private bool _plot;
+
+    /// <summary>
+    /// 是否在「RTT 曲线」页画这条链路（统计表最左侧的勾选框）。
+    /// 是界面状态、不写配置：曲线数据属于当前会话，重启后本来就该从零开始。
+    /// </summary>
+    public bool Plot { get => _plot; set => Set(ref _plot, value); }
+
     /// <summary>链路名（不含协议后缀）——用于把"同链路其它协议学到的本端出口 IP"复用到本行。</summary>
     public string LinkName { get; init; } = "";
     public string Target { get; init; } = "";

@@ -110,6 +110,15 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, string> _linkEgress = new(StringComparer.Ordinal);
 
     /// <summary>
+    /// 「RTT 曲线」页的数据：按「链路 + 协议」保存**整个会话**的采样。
+    /// 不复用「实时RTT明细」那张表——它只留最后 2000 条，现场 21 路探测只够 95 秒，画不出一个会话。
+    /// </summary>
+    private readonly ChartHistory _chartHistory = new();
+
+    /// <summary>用户勾选过的曲线键（按会话键记着，链路/协议重建统计行后勾选状态不丢）。</summary>
+    private readonly HashSet<string> _chartSelection = new(StringComparer.Ordinal);
+
+    /// <summary>
     /// 探测循环每轮开始时读取的“当前会话号”。
     /// 必须每轮重新读取：若固定为启动时的值，点击“清除”后所有结果都会被当成陈旧数据丢弃，
     /// 统计将永远无法重新开始。
@@ -141,6 +150,9 @@ public partial class MainWindow : Window
 
         _uiTimer.Tick += OnUiTick;
         _uiTimer.Start();
+
+        // 切到「RTT 曲线」页时立刻补画一次（不在这页时每 500 毫秒的重画就跳过了）
+        MainTabs.SelectionChanged += (_, _) => RefreshChart();
 
         _log.ErrorOccurred += OnLogError;
 
@@ -943,6 +955,10 @@ public partial class MainWindow : Window
         _anomalies.Clear();
         _trend.Clear();
 
+        // 曲线跟着会话走：采样清零，但"勾了哪几条"保留（清除后通常还要看同样几条）
+        _chartHistory.Clear();
+        if (MainTabs.SelectedItem == ChartTab) ChartPanel.Update(_chartHistory.SelectedSeries, _settings.WarningRttMs);
+
         while (_pending.TryDequeue(out _)) { }
     }
 
@@ -1533,10 +1549,47 @@ public partial class MainWindow : Window
         DrainPendingResults();
         ApplyLiveLinksIfDue();
         RefreshStats();
+        RefreshChart();
         UpdateNodeNameDisplay();
         RefreshRegistryUi();
         WarnOnExternalConfigChange();
         RefreshStatusBar();
+    }
+
+    // ---------------- RTT 曲线 ----------------
+
+    /// <summary>
+    /// 刷新曲线页。不在这一页时直接跳过——长会话下重画几万个点是有成本的，
+    /// 没必要在用户看着别的页时每 500 毫秒白跑一次（切回来时会立刻补上）。
+    /// </summary>
+    private void RefreshChart()
+    {
+        if (MainTabs.SelectedItem != ChartTab) return;
+
+        ChartPanel.Update(_chartHistory.SelectedSeries, _settings.WarningRttMs);
+    }
+
+    /// <summary>
+    /// 统计表最左侧的「曲线」勾选框变化 → 决定画哪几条曲线。
+    /// 取消勾选只停止画和停止收数据，**不清历史**：误点一下不该丢掉整段曲线。
+    /// </summary>
+    private void OnStatRowChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(StatRow.Plot) || sender is not StatRow row) return;
+
+        if (row.Plot)
+        {
+            _chartSelection.Add(row.Key);
+            _chartHistory.Select(row.Key, row.LinkName, row.Protocol, row.Target);
+        }
+        else
+        {
+            _chartSelection.Remove(row.Key);
+            _chartHistory.Deselect(row.Key);
+        }
+
+        // 勾选后立刻出图，不必等下一个 500 毫秒 tick
+        if (MainTabs.SelectedItem == ChartTab) ChartPanel.Update(_chartHistory.SelectedSeries, _settings.WarningRttMs);
     }
 
     /// <summary>
@@ -1644,6 +1697,9 @@ public partial class MainWindow : Window
 
         if (batch.Count == 0) return;
 
+        // 曲线数据要的是**整个会话**：在结果被丢进 2000 条上限的明细表之前先喂给曲线
+        _chartHistory.AddRange(batch);
+
         // 同一批内按“最新在前”插入，保持与逐条到达时一致的显示顺序
         for (var i = batch.Count - 1; i >= 0; i--)
         {
@@ -1679,6 +1735,10 @@ public partial class MainWindow : Window
             }
             else
             {
+                // 先在挂事件之前恢复勾选状态，避免"新建行 → 触发勾选事件"这种自我打扰
+                if (_chartSelection.Contains(incoming.Key)) incoming.Plot = true;
+                incoming.PropertyChanged += OnStatRowChanged;
+
                 _statRows[incoming.Key] = incoming;
                 ApplyCarrier(incoming);
                 _stats.Insert(Math.Min(i, _stats.Count), incoming);

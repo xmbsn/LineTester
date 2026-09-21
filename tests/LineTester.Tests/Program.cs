@@ -109,6 +109,11 @@ internal static partial class Program
             await TestRegistryCompatMatrixAsync();
             TestRepoTemplateLoads();
             TestLinkConfigCloneIsComplete();
+            TestChartHistory();
+            TestChartMath();
+            TestStatRowCopyFrom();
+            TestChartRendersCurves();
+            TestChartUi();
             TestIcmpPing();
             TestIcmpKeepsSending();
             TestIcmpProbe();
@@ -1347,6 +1352,7 @@ internal static partial class Program
             ListenPort = listenPort,
             IntervalMs = 300,
             TimeoutMs = 500,
+            EnableIcmp = true,
             Registrar = new RegistrarConfig
             {
                 Enabled = true,
@@ -1359,8 +1365,8 @@ internal static partial class Program
             },
             Links =
             {
-                new LinkConfig { Name = "机房B", Host = "127.0.0.1", Port = echoPort },
-                new LinkConfig { Name = "机房C", Host = "192.0.2.9", Port = echoPort }
+                new LinkConfig { Name = "机房B", Host = "127.0.0.1", Port = echoPort, Icmp = true },
+                new LinkConfig { Name = "机房C", Host = "192.0.2.9", Port = echoPort, Icmp = true }
             }
         });
 
@@ -1384,6 +1390,12 @@ internal static partial class Program
                 var badRow = (LinkRow)linkRows[linkRows.Count - 1]!;
                 badRow.PortText = "abc";
                 Pump(300);
+
+                // 勾上几条曲线再截图：否则「RTT 曲线」页渲染出来是空的，等于没法人工检查它好不好看
+                // （机房C 是黑洞地址，正好用来展示丢包的红点与断口）
+                var chartStats = (System.Collections.IList)GetPrivateField(window, "_stats")!;
+                foreach (var stat in chartStats.Cast<StatRow>().Take(4)) stat.Plot = true;
+                Pump(4000);
 
                 for (var index = 0; index < tabs.Items.Count; index++)
                 {

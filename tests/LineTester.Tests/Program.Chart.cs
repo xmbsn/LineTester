@@ -1,0 +1,508 @@
+using System.IO;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using LineTester.Views;
+
+namespace LineTester.Tests;
+
+/// <summary>
+/// RTT 曲线的自检。
+///
+/// 分三层：
+/// ① 历史缓冲（<see cref="ChartHistory"/>）——谁收数据、取消勾选后历史还在不在；
+/// ② 纯计算（<see cref="ChartMath"/>）——刻度、像素列聚合、缩放锚点、悬停吸附；
+/// ③ 真实窗口——勾选统计行是否真的出曲线、悬停是否给得出值。
+/// 渲染好不好看没有断言能替代眼睛，所以另有一张 `--render-ui` 出的 PNG 供人工看。
+/// </summary>
+internal static partial class Program
+{
+    private static ProbeResult ChartSampleResult(string link, string host, int port, string protocol, DateTime time, double? rtt, bool lost)
+        => new()
+        {
+            LinkName = link,
+            Host = host,
+            Port = port,
+            Protocol = protocol,
+            Timestamp = time,
+            RttMs = rtt,
+            Lost = lost
+        };
+
+    // ---------------- ① 历史缓冲 ----------------
+
+    private static void TestChartHistory()
+    {
+        Section("RTT 曲线：会话历史缓冲");
+
+        var history = new ChartHistory();
+        var t0 = new DateTime(2026, 9, 21, 10, 0, 0);
+        const string key = "机房B|127.0.0.1|9001|TCP";
+
+        Check("没勾选时没有任何曲线", history.SelectedSeries.Count == 0);
+
+        history.Select(key, "机房B", "TCP", "127.0.0.1:9001");
+        var series = history.Find(key);
+        Check("勾选后建立曲线", series is not null);
+        Eq("曲线名 = 链路名称 + 协议名称", "机房B · TCP", series!.Name);
+        Eq("只勾一条时选中集合只有一条", 1, history.SelectedSeries.Count);
+
+        history.Add(ChartSampleResult("机房B", "127.0.0.1", 9001, "TCP", t0, 12.5, false));
+        history.Add(ChartSampleResult("机房B", "127.0.0.1", 9001, "TCP", t0.AddSeconds(2), 13.0, false));
+        Eq("勾选的曲线收到采样", 2, series.Count);
+
+        // 结果按完成顺序回来，同一批里时间戳会轻微乱序；缓冲必须自己保持有序
+        history.Add(ChartSampleResult("机房B", "127.0.0.1", 9001, "TCP", t0.AddSeconds(1), 11.0, false));
+        Check("乱序到达的采样被按时间插入",
+            series.Samples.Select(s => s.Time).SequenceEqual(new[] { t0, t0.AddSeconds(1), t0.AddSeconds(2) }),
+            string.Join(",", series.Samples.Select(s => s.Time.ToString("HH:mm:ss"))));
+
+        history.Add(ChartSampleResult("机房B", "127.0.0.1", 9001, "TCP", t0.AddSeconds(3), 0, true));
+        Eq("丢包也记进曲线（不是丢掉不记）", 4, series.Count);
+        Eq("丢包数统计正确", 1, series.LostCount);
+        Eq("丢包点没有 RTT 值（不会算进最大延迟）", 13.0, series.MaxRtt(t0, t0.AddSeconds(10)));
+
+        // 取消勾选：停止画、停止收，但历史留着——误点一下不该丢掉整段曲线
+        history.Deselect(key);
+        history.Add(ChartSampleResult("机房B", "127.0.0.1", 9001, "TCP", t0.AddSeconds(4), 14.0, false));
+        Eq("取消勾选后不再收新数据", 4, series.Count);
+        Check("取消勾选的曲线不再出现在选中集合", history.SelectedSeries.Count == 0);
+        Check("取消勾选不会丢掉已有历史", series.Count == 4);
+
+        history.Select(key, "机房B", "TCP", "127.0.0.1:9001");
+        history.Add(ChartSampleResult("机房B", "127.0.0.1", 9001, "TCP", t0.AddSeconds(5), 15.0, false));
+        Eq("重新勾选后接着收（历史是连续的）", 5, series.Count);
+
+        // 会话范围：多条曲线取并集
+        var other = "机房C|192.0.2.9|9001|UDP";
+        history.Select(other, "机房C", "UDP", "192.0.2.9:9001");
+        history.Add(ChartSampleResult("机房C", "192.0.2.9", 9001, "UDP", t0.AddSeconds(-5), 40.0, false));
+        var range = history.TimeRange;
+        Check("会话时间范围取所有曲线的并集",
+            range is not null && range.Value.Start == t0.AddSeconds(-5) && range.Value.End == t0.AddSeconds(5),
+            range is null ? "null" : $"{range.Value.Start:HH:mm:ss}~{range.Value.End:HH:mm:ss}");
+
+        // 开新会话：采样清零，但"勾了哪几条"保留
+        history.Clear();
+        Eq("清除后没有采样", 0, series.Count);
+        Eq("清除后仍保留勾选（不用重新勾一遍）", 2, history.SelectedSeries.Count);
+
+        // 上限：极长会话的安全阀
+        var capped = new ChartHistory { MaxSamplesPerSeries = 5 };
+        capped.Select(key, "机房B", "TCP", "127.0.0.1:9001");
+        for (var i = 0; i < 8; i++) capped.Add(ChartSampleResult("机房B", "127.0.0.1", 9001, "TCP", t0.AddSeconds(i), i, false));
+        var cappedSeries = capped.Find(key)!;
+        Eq("超过上限后只保留最新 N 条", 5, cappedSeries.Count);
+        Check("裁掉最早采样会被标记出来（界面上要提示）", cappedSeries.Trimmed);
+        Eq("保留的是最新的那批", t0.AddSeconds(3), cappedSeries.Samples[0].Time);
+    }
+
+    // ---------------- ② 纯计算 ----------------
+
+    private static void TestChartMath()
+    {
+        Section("RTT 曲线：刻度 / 聚合 / 缩放 / 悬停吸附");
+
+        // ---- Y 轴 ----
+        var scale = ChartMath.ComputeYScale(0, 300);
+        Check("没有数据时 Y 轴仍然给得出高度（不会除零）", scale.Max > 0 && scale.Step > 0, $"{scale.Max}/{scale.Step}");
+        Check("阈值必须落在 Y 轴范围内（否则看不到有没有超阈值）", scale.Max >= 300, scale.Max.ToString());
+
+        var big = ChartMath.ComputeYScale(1500, 300);
+        Check("Y 轴上界容得下可见范围最大值", big.Max >= 1500, big.Max.ToString());
+        Check("Y 轴刻度是整数步长", big.Ticks().Count >= 3 && big.Ticks().All(v => Math.Abs(v % big.Step) < 1e-6),
+            string.Join(",", big.Ticks()));
+        Eq("Y 轴从 0 起（延迟看绝对量）", 0.0, big.Min);
+
+        Eq("漂亮步长 1/2/5×10^n", 500.0, ChartMath.NiceStep(431.25));
+
+        // ---- 时间轴 ----
+        var start = new DateTime(2026, 9, 21, 10, 0, 0);
+        Eq("10 分钟跨度用 2 分钟刻度", TimeSpan.FromMinutes(2), ChartMath.ChooseTimeStep(TimeSpan.FromMinutes(10), 6));
+        Eq("1 小时跨度用 10 分钟刻度", TimeSpan.FromMinutes(10), ChartMath.ChooseTimeStep(TimeSpan.FromHours(1), 6));
+
+        var ticks = ChartMath.TimeTicks(start, start.AddMinutes(10), 6);
+        Check("刻度落在整分钟上（不是 10:00:47 这种）",
+            ticks.All(t => t.Second == 0 && t.Millisecond == 0) && ticks.Count >= 5,
+            string.Join(",", ticks.Select(t => t.ToString("HH:mm:ss"))));
+        Eq("刻度首尾落在区间内", true, ticks.All(t => t >= start && t <= start.AddMinutes(10)));
+
+        var oddStart = new DateTime(2026, 9, 21, 10, 0, 3);
+        var oddTicks = ChartMath.TimeTicks(oddStart, oddStart.AddSeconds(60), 6);
+        Check("起点不整齐时第一个刻度也对齐到步长", oddTicks.Count > 0 && oddTicks[0].Second % 10 == 0,
+            oddTicks.Count > 0 ? oddTicks[0].ToString("HH:mm:ss") : "无刻度");
+
+        Check("跨天时轴标签带日期", ChartMath.FormatAxisTime(start, TimeSpan.FromDays(2)).Contains("-"));
+        Check("短会话标签只到秒", !ChartMath.FormatAxisTime(start, TimeSpan.FromSeconds(20)).Contains("-"));
+
+        // ---- 坐标换算 ----
+        var plotLeft = 56.0;
+        var plotWidth = 600.0;
+        var end = start.AddMinutes(10);
+        Eq("时间→屏幕再换算回来是同一个时刻", start.AddMinutes(5),
+            ChartMath.TimeOf(ChartMath.XOf(start.AddMinutes(5), start, end, plotLeft, plotWidth), start, end, plotLeft, plotWidth));
+
+        Eq("鼠标移出左边界时夹在区间起点", start,
+            ChartMath.TimeOf(-100, start, end, plotLeft, plotWidth));
+        Eq("鼠标移出右边界时夹在区间终点", end,
+            ChartMath.TimeOf(99999, start, end, plotLeft, plotWidth));
+
+        // ---- 像素列聚合：长会话"所有数据都画了"靠它 ----
+        var samples = new List<ChartSample>
+        {
+            new(start, 1, false),
+            new(start.AddSeconds(3), 0, true),      // 只丢包的列
+            new(start.AddSeconds(6), 9, false)
+        };
+
+        var buckets = new ChartMath.ChartBucket[3];
+        ChartMath.Aggregate(samples, start, start.AddSeconds(6), 3, buckets);
+        Check("丢包单独成列：有丢包、没有成功采样", buckets[1].HasLoss && !buckets[1].HasOk);
+        Eq("成功列的最小值", 1.0, buckets[0].Min);
+        Eq("成功列的最大值", 9.0, buckets[2].Max);
+
+        var dense = Enumerable.Range(0, 100)
+            .Select(i => new ChartSample(start.AddMilliseconds(i * 100), i % 2 == 0 ? 10 + i : 5 + i, false))
+            .ToList();
+        var wide = new ChartMath.ChartBucket[10];
+        ChartMath.Aggregate(dense, start, start.AddSeconds(10), 10, wide);
+        Eq("聚合后样本总数不丢（一条都没被采样掉）", 100, wide.Sum(b => b.OkCount));
+        Eq("每列都记录了该列的最大值（尖刺不会被抽掉）", 108.0, wide.Max(b => b.Max));
+        Eq("每列都记录了该列的最小值", 6.0, wide.Min(b => b.Min));
+
+        var outside = new ChartMath.ChartBucket[4];
+        ChartMath.Aggregate(dense, start.AddMinutes(5), start.AddMinutes(6), 4, outside);
+        Eq("区间外没有采样时不产生任何列", 0, outside.Sum(b => b.OkCount + b.LostCount));
+
+        // ---- 悬停吸附 ----
+        var line = new List<ChartSample> { new(start, 1, false), new(start.AddSeconds(1), 2, false), new(start.AddSeconds(2), 3, false) };
+        Eq("吸附到最近的采样点", 2, ChartMath.NearestIndex(line, start.AddSeconds(1.6), TimeSpan.FromSeconds(1)));
+        Eq("超出容差就不硬指一个远处的点", -1, ChartMath.NearestIndex(line, start.AddSeconds(30), TimeSpan.FromSeconds(2)));
+        Eq("空曲线返回 -1", -1, ChartMath.NearestIndex(Array.Empty<ChartSample>(), start, TimeSpan.FromSeconds(5)));
+        Eq("二分定位：第一个不早于给定时刻的下标", 1, ChartMath.LowerBound(line, start.AddSeconds(1)));
+
+        // ---- 缩放：以鼠标位置为锚点 ----
+        var floor = start;
+        var ceiling = start.AddHours(1);
+        var anchor = start.AddMinutes(30);
+        var zoomed = ChartMath.ZoomRange(floor, ceiling, anchor, 0.5, TimeSpan.FromSeconds(5), floor, ceiling);
+        Near("缩放后跨度减半", 30.0, (zoomed.End - zoomed.Start).TotalMinutes, 0.01);
+        Near("鼠标指着的时刻在缩放前后位置不变（不会跑掉）",
+            0.5, (anchor - zoomed.Start).TotalMinutes / (zoomed.End - zoomed.Start).TotalMinutes, 0.01);
+
+        var edge = ChartMath.ZoomRange(floor, ceiling, start.AddMinutes(2), 0.25, TimeSpan.FromSeconds(5), floor, ceiling);
+        Near("靠边缩放时锚点位置同样保持（等于原来的相对位置）",
+            2.0 / 60, (start.AddMinutes(2) - edge.Start).TotalMinutes / (edge.End - edge.Start).TotalMinutes, 0.02);
+        Check("缩放不会越出会话范围", edge.Start >= floor && edge.End <= ceiling,
+            $"{edge.Start:HH:mm:ss}~{edge.End:HH:mm:ss}");
+
+        var tiny = ChartMath.ZoomRange(floor, ceiling, anchor, 0.00001, TimeSpan.FromSeconds(5), floor, ceiling);
+        Check("缩放有下限（不会缩到 0 秒）", (tiny.End - tiny.Start) >= TimeSpan.FromSeconds(5),
+            (tiny.End - tiny.Start).TotalSeconds.ToString("F1"));
+
+        // 会话比"最小缩放粒度"还短时，最小粒度不能反过来把缩放锁死（短会话里滚轮必须还有反应）
+        var shortSession = ChartMath.ZoomRange(
+            floor, floor.AddSeconds(4), floor.AddSeconds(2), 0.5, TimeSpan.FromSeconds(2), floor, floor.AddSeconds(4));
+        Check("短会话也能缩放（最小粒度不会锁死）",
+            (shortSession.End - shortSession.Start) < TimeSpan.FromSeconds(4),
+            (shortSession.End - shortSession.Start).TotalSeconds.ToString("F2"));
+
+        var outZoom = ChartMath.ZoomRange(floor, ceiling, anchor, 1000, TimeSpan.FromSeconds(5), floor, ceiling);
+        Check("缩到底就是全程（不会超出会话）", outZoom.Start == floor && outZoom.End == ceiling,
+            $"{outZoom.Start:HH:mm:ss}~{outZoom.End:HH:mm:ss}");
+
+        // ---- 平移：不越出会话 ----
+        var viewStart = start.AddMinutes(10);
+        var viewEnd = start.AddMinutes(20);
+        var right = ChartMath.PanRange(viewStart, viewEnd, TimeSpan.FromHours(5), floor, ceiling);
+        Check("向右拖到底会停在会话末尾", right.End == ceiling && (right.End - right.Start) == TimeSpan.FromMinutes(10),
+            $"{right.Start:HH:mm:ss}~{right.End:HH:mm:ss}");
+
+        var left = ChartMath.PanRange(viewStart, viewEnd, TimeSpan.FromHours(-5), floor, ceiling);
+        Check("向左拖到底会停在会话开头", left.Start == floor && (left.End - left.Start) == TimeSpan.FromMinutes(10),
+            $"{left.Start:HH:mm:ss}~{left.End:HH:mm:ss}");
+
+        Eq("中间范围平移多少就是多少", start.AddMinutes(12),
+            ChartMath.PanRange(viewStart, viewEnd, TimeSpan.FromMinutes(2), floor, ceiling).Start);
+    }
+
+    // ---------------- ③ CopyFrom 的漂移守卫 ----------------
+
+    private static void TestStatRowCopyFrom()
+    {
+        Section("统计行复制：加了字段没同步搬就会被断言抓住");
+
+        // CopyFrom 只搬"测试结果"字段：Plot 是界面状态；运营商那几个字段由 ApplyCarrier 单独写。
+        // 这条用例的价值是防止以后新增统计列（例如抖动）时漏搬——ICMP 那次就是漏搬字段吃的亏。
+        var skip = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "Plot", "LocalCarrier", "LocalExitText", "RemoteCarrier", "CrossNetText", "CrossNetState", "CarrierDetail"
+        };
+
+        var source = new StatRow { Key = "机房B|127.0.0.1|9001|TCP", LinkName = "机房B", Name = "机房B / TCP", Target = "127.0.0.1:9001" };
+        var props = typeof(StatRow).GetProperties()
+            .Where(p => p is { CanRead: true, CanWrite: true } && !skip.Contains(p.Name))
+            .ToList();
+
+        foreach (var p in props)
+        {
+            object value = p.PropertyType == typeof(int) ? 42 : "v-" + p.Name;
+            p.SetValue(source, value);
+        }
+
+        var target = new StatRow { Key = source.Key, LinkName = source.LinkName, Name = source.Name, Target = source.Target };
+        target.CopyFrom(source);
+
+        foreach (var p in props)
+        {
+            Eq($"CopyFrom 搬了 {p.Name}", p.GetValue(source)?.ToString() ?? "", p.GetValue(target)?.ToString() ?? "");
+        }
+
+        target.Plot = true;
+        var again = new StatRow { Key = source.Key };
+        again.CopyFrom(target);
+        Check("CopyFrom 不会把界面勾选状态一起搬走", !again.Plot);
+    }
+
+    // ---------------- ⑤ 真的画出来了吗（像素级） ----------------
+
+    /// <summary>
+    /// 没有视觉模型可看，就用**像素**证明曲线确实画到了图上：
+    /// 按配色去数像素，数得到才说明曲线/刻度/阈值线/丢包标记真的落到了画面上。
+    /// （好不好看只能靠人看 `--render-ui` 出的 PNG，这部分断言替代不了。）
+    /// </summary>
+    private static void TestChartRendersCurves()
+    {
+        Section("RTT 曲线：真实渲染（按像素颜色验证曲线/刻度/阈值线/丢包标记都画出来了）");
+
+        var history = new ChartHistory();
+        var t0 = new DateTime(2026, 9, 21, 10, 0, 0);
+        var rnd = new Random(7);
+
+        // 注意：登记键必须和 ProbeResult 自己算出来的键一致（链路名|主机|端口|协议）。
+        // 不一致时 Add 找不到曲线，图上只剩一句"请先勾选链路"的提示——
+        // 而"没有曲线"和"画错了"在截图上长得一模一样，所以下面先断言数据真的进去了。
+        history.Select("机房A|127.0.0.1|1|TCP", "机房A", "TCP", "127.0.0.1:1");
+        history.Select("机房B|127.0.0.1|1|UDP", "机房B", "UDP", "127.0.0.1:1");
+
+        for (var i = 0; i < 40; i++)
+        {
+            var time = t0.AddSeconds(i);
+            history.Add(ChartSampleResult("机房A", "127.0.0.1", 1, "TCP", time, 20 + rnd.NextDouble() * 30, i is 10 or 11 or 12));
+            history.Add(ChartSampleResult("机房B", "127.0.0.1", 1, "UDP", time, 200 + rnd.NextDouble() * 60, false));
+        }
+
+        Eq("两条曲线都收到了采样", 40, history.SelectedSeries[0].Count);
+
+        RunOnSta(() =>
+        {
+            const int width = 700;
+            const int height = 320;
+
+            var chart = new RttChart { Width = width, Height = height, WarningMs = 150 };
+            chart.SetSeries(history.SelectedSeries);
+            chart.Refresh();
+            chart.Measure(new Size(width, height));
+            chart.Arrange(new Rect(0, 0, width, height));
+            chart.UpdateLayout();
+
+            var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
+            bitmap.Render(chart);
+
+            var stride = width * 4;
+            var pixels = new byte[stride * height];
+            bitmap.CopyPixels(pixels, stride, 0);
+
+            int CountNear(Color target, int tolerance)
+            {
+                var count = 0;
+                for (var i = 0; i + 3 < pixels.Length; i += 4)
+                {
+                    var alpha = pixels[i + 3];
+                    if (alpha < 40) continue;
+
+                    // RenderTargetBitmap 是**预乘 alpha**：先还原成原色再比。
+                    // 不还原的话，抗锯齿的细线（1.4px 的曲线）像素会被整体拉暗，
+                    // 看起来像"根本没画"——这条差点把我自己骗过去。
+                    var b = pixels[i] * 255 / alpha;
+                    var g = pixels[i + 1] * 255 / alpha;
+                    var r = pixels[i + 2] * 255 / alpha;
+
+                    if (Math.Abs(r - target.R) <= tolerance &&
+                        Math.Abs(g - target.G) <= tolerance &&
+                        Math.Abs(b - target.B) <= tolerance) count++;
+                }
+
+                return count;
+            }
+
+            var first = CountNear(RttChart.SeriesColor(0), 20);
+            var second = CountNear(RttChart.SeriesColor(1), 20);
+
+            // 曲线为空时先分清是"没数据"还是"没画"：这一步把聚合单独跑一遍
+            var view = chart.ViewRange!.Value;
+            var probe = new ChartMath.ChartBucket[600];
+            ChartMath.Aggregate(chart.Series[0].Samples, view.Start, view.End, 600, probe);
+            Check("视图范围内聚合得出成功采样（否则曲线必然是空的）",
+                probe.Sum(x => x.OkCount) > 0,
+                $"ok={probe.Sum(x => x.OkCount)} lost={probe.Sum(x => x.LostCount)} " +
+                $"view={view.Start:HH:mm:ss.fff}~{view.End:HH:mm:ss.fff} " +
+                $"span={(view.End - view.Start).TotalSeconds:F1}s 采样={chart.Series[0].Count}");
+
+            Check("第 1 条曲线画到了图上（按配色数得到像素）", first > 100, first + " 像素");
+            Check("第 2 条曲线画到了图上（两条颜色不同，不会混成一条）", second > 100, second + " 像素");
+
+            var ticks = CountNear(Color.FromRgb(0x5F, 0x63, 0x68), 16);      // Y/X 轴刻度文字
+            Check("坐标轴刻度文字画出来了", ticks > 200, ticks + " 像素");
+
+            var grid = CountNear(Color.FromRgb(0xEC, 0xEE, 0xF1), 3);
+            Check("网格线画出来了", grid > 500, grid + " 像素");
+
+            var warn = CountNear(Color.FromRgb(0xB0, 0x60, 0x10), 16);       // 阈值线旁边的标注
+            Check("阈值线与其标注画出来了", warn > 20, warn + " 像素");
+
+            var loss = CountNear(Color.FromRgb(0xC5, 0x22, 0x1F), 20);       // 丢包空心红点
+            Check("丢包标记画出来了（红点）", loss > 5, loss + " 像素");
+        }, "曲线渲染断言");
+    }
+
+    // ---------------- ④ 真实窗口 ----------------
+
+    private static void TestChartUi()
+    {
+        Section("RTT 曲线：勾选链路出图、缩放与悬停");
+
+        var root = Path.Combine(AppContext.BaseDirectory, ".testtmp", "chart_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        var previousOverride = ConfigManager.OverridePath;
+        ConfigManager.OverridePath = Path.Combine(root, "appsettings.json");
+
+        var echoServer = StartEchoServer(out var echoPort);
+        if (echoServer is null)
+        {
+            Check("回显服务启动", false, "找不到可绑定端口");
+            ConfigManager.OverridePath = previousOverride;
+            return;
+        }
+
+        ConfigManager.Save(new AppConfig
+        {
+            ListenPort = FindBindablePort(),
+            IntervalMs = 300,
+            TimeoutMs = 1000,
+            EnableTcp = true,
+            EnableUdp = true,
+            EnableIcmp = false,
+            WarningRttMs = 300,
+            Isp = new IspConfig { Enabled = false },
+            Links = { new LinkConfig { Name = "本机", Host = "127.0.0.1", Port = echoPort, Tcp = true, Udp = true } }
+        });
+
+        try
+        {
+            RunOnSta(() =>
+            {
+                var window = new MainWindow();
+                var tabs = (TabControl)window.FindName("MainTabs")!;
+
+                Check("有一个独立的「RTT 曲线」页", window.FindName("ChartTab") is TabItem { Header: "RTT 曲线" });
+
+                var panel = (RttChartPanel)window.FindName("ChartPanel")!;
+                var chart = panel.ChartControl;
+
+                // 窗口没有 Show()，布局不会自动跑；曲线的命中区（绘图区）依赖实际尺寸，
+                // 不先强制一次布局，控件的宽高还是 0，缩放与悬停会直接跳过（这条踩过）
+                var content = (FrameworkElement)window.Content;
+                content.Measure(new Size(1360, 900));
+                content.Arrange(new Rect(0, 0, 1360, 900));
+                content.UpdateLayout();
+
+                var statsGrid = (DataGrid)window.FindName("StatsGrid")!;
+                Check("统计表第一列是「曲线」勾选框",
+                    statsGrid.Columns.Count > 0 && Equals(statsGrid.Columns[0].Header, "曲线"),
+                    statsGrid.Columns.Count > 0 ? statsGrid.Columns[0].Header?.ToString() ?? "" : "无列");
+                Check("勾选列是复选框列", statsGrid.Columns[0] is DataGridCheckBoxColumn);
+
+                InvokePrivateHandler(window, "Start_Click");
+                Pump(2500);
+
+                var stats = (System.Collections.IList)GetPrivateField(window, "_stats")!;
+                Check("统计行已经出现", stats.Count >= 2, "行数=" + stats.Count);
+
+                var tcpRow = stats.Cast<StatRow>().First(r => r.Protocol == "TCP");
+                Eq("统计行能解析出协议名（曲线名要用）", "TCP", tcpRow.Protocol);
+
+                tabs.SelectedItem = window.FindName("ChartTab");
+                Pump(300);
+                Check("还没勾选时提示怎么用", chart.Series.Count == 0);
+
+                tcpRow.Plot = true;      // 等价于用户点了勾选框
+                Pump(3500);
+
+                Eq("勾选后出现一条曲线", 1, chart.Series.Count);
+                Check("曲线名 = 链路名称 + 协议名称", chart.Series[0].Name.StartsWith("本机 · "), chart.Series[0].Name);
+                Check("曲线按会话全程展示（默认不缩放）", !chart.IsZoomed);
+                Check("已经开始收采样", chart.Series[0].Count >= 2, "采样数=" + chart.Series[0].Count);
+
+                var range = chart.ViewRange;
+                var session = chart.SessionRange;
+                Check("视图范围等于会话范围（全程）",
+                    range is not null && session is not null && range.Value.Start == session.Value.Start,
+                    range is null ? "无视图" : $"{range.Value.Start:HH:mm:ss.fff}~{range.Value.End:HH:mm:ss.fff}");
+
+                // 滚轮缩放：真实事件走一遍控件的处理路径
+                var before = chart.ViewRange!.Value;
+                var spanBefore = before.End - before.Start;
+                chart.RaiseEvent(new MouseWheelEventArgs(Mouse.PrimaryDevice, 0, 120) { RoutedEvent = UIElement.MouseWheelEvent });
+                Pump(200);
+
+                var after = chart.ViewRange!.Value;
+                var spanAfter = after.End - after.Start;
+                Check("滚轮向上 = 放大（视图范围变小）", spanAfter < spanBefore,
+                    $"{spanBefore.TotalSeconds:F1} 秒 → {spanAfter.TotalSeconds:F1} 秒");
+                Check("缩放后进入「已缩放」状态（全览按钮可用）", chart.IsZoomed);
+                Check("缩放不会越出会话范围", after.Start >= session!.Value.Start && after.End <= session.Value.End,
+                    $"{after.Start:HH:mm:ss.fff}~{after.End:HH:mm:ss.fff}");
+
+                chart.ResetView();
+                Pump(200);
+                Check("「全览」回到会话全程", !chart.IsZoomed);
+
+                // 图例：一个条目，点击可隐藏
+                // （注意：图例在 UserControl 自己的命名域里，要用面板去 FindName，不能从窗口找）
+                var legend = (ItemsControl)panel.FindName("Legend")!;
+                Check("图例里有一条曲线", legend.Items.Count == 1, "条目数=" + legend.Items.Count);
+                var legendItem = (ChartLegendItem)legend.Items[0]!;
+                Eq("图例文字就是曲线名", chart.Series[0].Name, legendItem.Name);
+
+                chart.SetHidden(legendItem.Key, true);
+                Eq("隐藏后可见曲线数为 0", 0, chart.VisibleCount);
+                chart.SetHidden(legendItem.Key, false);
+                Eq("再点一次恢复显示", 1, chart.VisibleCount);
+
+                // 取消勾选：曲线从图上消失，但历史留着（重新勾选仍是完整一条）
+                var kept = chart.Series[0].Count;
+                tcpRow.Plot = false;
+                Pump(600);
+                Eq("取消勾选后图上不再有这条曲线", 0, chart.Series.Count);
+
+                tcpRow.Plot = true;
+                Pump(300);
+                Eq("重新勾选后曲线回来", 1, chart.Series.Count);
+                Check("历史没有因为取消勾选而清空", chart.Series[0].Count >= kept, $"{kept} → {chart.Series[0].Count}");
+
+                InvokePrivateHandler(window, "Stop_Click");
+                window.Close();
+            }, "RTT 曲线界面断言");
+        }
+        finally
+        {
+            echoServer.Dispose();
+            ConfigManager.OverridePath = previousOverride;
+            try { Directory.Delete(root, true); } catch { }
+        }
+    }
+}

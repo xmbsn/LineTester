@@ -375,9 +375,10 @@ internal static partial class Program
                 // 同时必须保证整表一屏放得下（否则最后一列又被挤出可视区 = 等于没有）。
                 var headers = statsGrid.Columns.Select(c => c.Header?.ToString() ?? "").ToList();
                 var operatorStart = headers.IndexOf("目标运营商");
-                Check("「链路」「目标」仍在最前两列（测试主体）",
-                    headers.Count > 1 && headers[0] == "链路" && headers[1] == "目标",
-                    string.Join("|", headers.Take(4)));
+                // 第一列是「曲线」勾选框（RTT 曲线页的选择器），测试主体仍然是紧随其后的链路/目标
+                Check("「链路」「目标」紧跟勾选列（测试主体）",
+                    headers.Count > 2 && headers[0] == "曲线" && headers[1] == "链路" && headers[2] == "目标",
+                    string.Join("|", headers.Take(5)));
                 Check("测试结果列排在运营商之前（平均RTT/发送丢包/状态/失败原因）",
                     operatorStart > 0 &&
                     headers.IndexOf("平均RTT") is > 0 and < int.MaxValue &&
