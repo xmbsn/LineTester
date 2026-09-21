@@ -1,0 +1,940 @@
+using System.Collections;
+using System.IO;
+using System.Net;
+using System.Reflection;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Data;
+using LineTester.Registry;
+using LineTester.Views;
+
+namespace LineTester.Tests;
+
+/// <summary>
+/// 切片 3（界面）的自检：注册配置页、中心节点管理、链路页联动、兼容矩阵的最后一行。
+///
+/// 三块分工：
+/// ① 纯逻辑（<see cref="RegistrarDraft"/> / <see cref="RegistryUiText"/> / <see cref="RegistryNodeRow"/>）直接断言；
+/// ② 页面的装配与往返在真实 <see cref="RegistryPanel"/> 上断言（STA 线程，不 Show 窗口）；
+/// ③ 主窗口联动走真实 <see cref="MainWindow"/>（含落盘与链路编辑器）。
+/// </summary>
+internal static partial class Program
+{
+    // ---------------- 注册配置草稿 ----------------
+
+    private static void TestRegistrarDraft()
+    {
+        Section("注册配置页：草稿往返与校验");
+
+        var source = new RegistrarConfig
+        {
+            Enabled = true,
+            ServeAsCenter = true,
+            NodeName = "机房A",
+            PublicHost = "203.0.113.9",
+            PublicPort = 9000,
+            Distributable = true,
+            AdvertiseTcp = false,
+            AdvertiseUdp = true,
+            CenterHost = "203.0.113.1",
+            CenterPort = 50000,
+            Secret = "s3cret",
+            HeartbeatSeconds = 60,
+            SyncSeconds = 300,
+            RetryMs = 1000,
+            MaxRetries = 5,
+            NodeId = "0123456789abcdef0123456789abcdef"
+        };
+
+        var draft = RegistrarDraft.From(source);
+        Eq("草稿：节点名称", "机房A", draft.NodeName);
+        Eq("草稿：外网端口转成文本", "9000", draft.PublicPortText);
+        Eq("草稿：同步周期", "300", draft.SyncText);
+        Eq("草稿：节点身份随配置带入", source.NodeId, draft.NodeId);
+        Check("草稿：密钥原样", draft.Secret == "s3cret");
+
+        var target = new RegistrarConfig();
+        Check("往返：写回配置成功", draft.TryApply(target, out var roundTripError), roundTripError);
+        Eq("往返：节点名称", source.NodeName, target.NodeName);
+        Eq("往返：外网地址", source.PublicHost, target.PublicHost);
+        Eq("往返：外网端口", source.PublicPort, target.PublicPort);
+        Eq("往返：中心地址", source.CenterHost, target.CenterHost);
+        Eq("往返：中心端口", source.CenterPort, target.CenterPort);
+        Eq("往返：心跳周期", source.HeartbeatSeconds, target.HeartbeatSeconds);
+        Eq("往返：同步周期", source.SyncSeconds, target.SyncSeconds);
+        Eq("往返：重传间隔", source.RetryMs, target.RetryMs);
+        Eq("往返：最大重传", source.MaxRetries, target.MaxRetries);
+        Eq("往返：节点身份保持不变（不能每次保存都换身份）", source.NodeId, target.NodeId);
+        Check("往返：可被 TCP 探测（false 也要带回）", !target.AdvertiseTcp && target.AdvertiseUdp);
+        Check("往返：承担中心角色", target.ServeAsCenter);
+
+        // 首次启用：空 NodeId 必须自动生成，否则中心会把同一台机器当成新节点
+        var fresh = new RegistrarConfig();
+        var freshDraft = RegistrarDraft.From(fresh);
+        freshDraft.NodeName = "新节点";
+        freshDraft.PublicHost = "203.0.113.20";
+        freshDraft.PublicPortText = "9000";
+        freshDraft.CenterHost = "203.0.113.1";
+        freshDraft.CenterPortText = "50000";
+        freshDraft.Enabled = true;
+        Check("首次启用可写回", freshDraft.TryApply(fresh, out var freshError), freshError);
+        Eq("首次启用自动生成 32 位节点身份", 32, fresh.NodeId.Length);
+        Eq("生成的身份也回填到草稿", fresh.NodeId, freshDraft.NodeId);
+
+        // 未启用注册：不校验空字段（与 ConfigManager.ValidateRegistrar 口径一致）
+        var empty = new RegistrarDraft { Enabled = false };
+        Eq("未启用时不做任何校验", "", empty.Validate());
+
+        // 逐项校验：每条都要能定位到具体字段
+        var bad = RegistrarDraft.From(source);
+        bad.NodeName = "  ";
+        Check("空节点名称被拦下", bad.Validate().Contains("节点名称"), bad.Validate());
+
+        bad = RegistrarDraft.From(source);
+        bad.PublicHost = "";
+        Check("空外网地址被拦下并说明原因", bad.Validate().Contains("外网地址"), bad.Validate());
+
+        bad = RegistrarDraft.From(source);
+        bad.PublicPortText = "abc";
+        Check("非数字外网端口被拦下", bad.Validate().Contains("外网端口"), bad.Validate());
+
+        bad = RegistrarDraft.From(source);
+        bad.PublicPortText = "70000";
+        Check("越界外网端口被拦下", bad.Validate().Contains("外网端口"), bad.Validate());
+
+        bad = RegistrarDraft.From(source);
+        bad.CenterHost = "";
+        Check("空中心地址被拦下", bad.Validate().Contains("注册中心地址"), bad.Validate());
+
+        bad = RegistrarDraft.From(source);
+        bad.CenterPortText = "0";
+        Check("中心端口 0 被拦下", bad.Validate().Contains("注册中心端口"), bad.Validate());
+
+        bad = RegistrarDraft.From(source);
+        bad.HeartbeatText = (RegistrarConfig.MinIntervalSeconds - 1).ToString();
+        Check("心跳周期过小被拦下", bad.Validate().Contains("心跳周期"), bad.Validate());
+
+        bad = RegistrarDraft.From(source);
+        bad.SyncText = (RegistrarConfig.MaxIntervalSeconds + 1).ToString();
+        Check("同步周期过大被拦下", bad.Validate().Contains("同步周期"), bad.Validate());
+
+        bad = RegistrarDraft.From(source);
+        bad.RetryText = "10";
+        Check("重传间隔过小被拦下", bad.Validate().Contains("重传间隔"), bad.Validate());
+
+        bad = RegistrarDraft.From(source);
+        bad.MaxRetriesText = (RegistrarConfig.MaxRetriesLimit + 1).ToString();
+        Check("最大重传次数过大被拦下", bad.Validate().Contains("最大重传次数"), bad.Validate());
+
+        // 多个问题要一次列全，而不是让用户改一个报一个
+        bad = RegistrarDraft.From(source);
+        bad.NodeName = "";
+        bad.CenterHost = "";
+        Check("多个问题一次列全", bad.Validate().Split('；').Length >= 2, bad.Validate());
+
+        // 拦下时必须不改动配置：否则会出现"改了一半"的配置被落盘
+        var untouched = RegistrarDraft.From(source);
+        untouched.CenterPortText = "99999";
+        var before = (target.NodeName, target.PublicHost, target.PublicPort, target.CenterHost, target.CenterPort);
+        Check("非法草稿写回失败", !untouched.TryApply(target, out _));
+        Eq("失败后节点名称未被改写", before.NodeName, target.NodeName);
+        Eq("失败后中心端口未被改写", before.CenterPort, target.CenterPort);
+
+        // 边界值：两端都要能通过
+        var bounds = RegistrarDraft.From(source);
+        bounds.PublicPortText = "1";
+        bounds.CenterPortText = "65535";
+        bounds.HeartbeatText = RegistrarConfig.MinIntervalSeconds.ToString();
+        bounds.SyncText = RegistrarConfig.MaxIntervalSeconds.ToString();
+        bounds.RetryText = RegistrarConfig.MinRetryMs.ToString();
+        bounds.MaxRetriesText = "0";
+        Eq("边界值全部通过", "", bounds.Validate());
+
+        // 主机名是合法的外网地址（可分发规则允许主机名）
+        var hostname = RegistrarDraft.From(source);
+        hostname.PublicHost = "vpn.example.com";
+        Eq("主机名形式的外网地址通过校验", "", hostname.Validate());
+    }
+
+    // ---------------- 文案 ----------------
+
+    private static void TestRegistryUiText()
+    {
+        Section("注册页文案：连接状态 / 对外地址核对 / 分发状态");
+
+        var now = new DateTime(2026, 9, 20, 12, 3, 0, DateTimeKind.Utc);
+
+        var disabled = new RegistrarConfig();
+        Check("未启用注册：状态栏不显示注册信息", RegistryUiText.DescribeConnection(null, disabled, now) is null);
+        Check("未启用注册：不显示对外地址核对", RegistryUiText.DescribeSelfCheck(null, disabled) is null);
+        Check("未启用注册：不显示分发状态", RegistryUiText.DescribeSelfDistribution(disabled) is null);
+
+        var config = new RegistrarConfig
+        {
+            Enabled = true,
+            NodeName = "机房A",
+            PublicHost = "203.0.113.9",
+            PublicPort = 9000,
+            CenterHost = "203.0.113.1",
+            CenterPort = 50000
+        };
+
+        var notRunning = RegistryUiText.DescribeConnection(null, config, now);
+        Check("启用但未启动：提示需先启动测试", notRunning is { Warning: true } &&
+            notRunning.Text.Contains("未运行"), notRunning?.Text);
+
+        var waiting = RegistryUiText.DescribeConnection(new RegistryClientStatus { Running = true }, config, now);
+        Check("已启动未回执：提示等待首次回执",
+            waiting is { Warning: false } && waiting.Text.Contains("等待首次回执"), waiting?.Text);
+
+        var healthy = RegistryUiText.DescribeConnection(new RegistryClientStatus
+        {
+            Running = true,
+            LastSuccessUtc = now.AddSeconds(-20),
+            Revision = 138,
+            NodeCount = 6
+        }, config, now);
+        Check("正常：状态栏给出中心地址/rev/节点数",
+            healthy is { Warning: false } &&
+            healthy.Text.Contains("203.0.113.1:50000") &&
+            healthy.Text.Contains("rev 138") &&
+            healthy.Text.Contains("节点 6"), healthy?.Text);
+        Check("正常：状态栏带同步时刻",
+            healthy!.Text.Contains(now.AddSeconds(-20).ToLocalTime().ToString("HH:mm")), healthy.Text);
+
+        var unreachable = RegistryUiText.DescribeConnection(new RegistryClientStatus
+        {
+            Running = true,
+            LastAttemptUtc = now,
+            LastSuccessUtc = now.AddMinutes(-4),
+            LastError = "中心无应答（超时）"
+        }, config, now);
+        Check("不可达：给出原因与已持续时长",
+            unreachable is { Warning: true } &&
+            unreachable.Text.Contains("不可达") &&
+            unreachable.Text.Contains("已 4 分钟") &&
+            unreachable.Text.Contains("退避中"), unreachable?.Text);
+
+        // ---- 对外地址核对 ----
+        var noReply = RegistryUiText.DescribeSelfCheck(null, config);
+        Check("未收到回执：说明外网地址必须手工填写",
+            noReply is { Warning: false } && noReply.Text.Contains("手工填写"), noReply?.Text);
+
+        var matched = RegistryUiText.DescribeSelfCheck(
+            new RegistryClientStatus { Running = true, SeenFrom = "203.0.113.9:9000" }, config);
+        Check("IP 与端口都一致：给出确认", matched is { Warning: false } && matched.Text.StartsWith("✓"), matched?.Text);
+
+        var portDiff = RegistryUiText.DescribeSelfCheck(
+            new RegistryClientStatus { Running = true, SeenFrom = "203.0.113.9:51234" }, config);
+        Check("IP 一致但端口不同：提示这是出向 NAT 的正常现象而不是错误",
+            portDiff is { Warning: true } &&
+            portDiff.Text.Contains("51234") && portDiff.Text.Contains("9000") &&
+            portDiff.Text.Contains("正常现象"), portDiff?.Text);
+
+        var ipDiff = RegistryUiText.DescribeSelfCheck(
+            new RegistryClientStatus { Running = true, SeenFrom = "198.51.100.7:51234" }, config);
+        Check("IP 不同：提示确认地址是否可达",
+            ipDiff is { Warning: true } && ipDiff.Text.Contains("198.51.100.7"), ipDiff?.Text);
+
+        var hostname = new RegistrarConfig
+        {
+            Enabled = true, PublicHost = "vpn.example.com", PublicPort = 9000,
+            CenterHost = "203.0.113.1", CenterPort = 50000
+        };
+        var hostnameCheck = RegistryUiText.DescribeSelfCheck(
+            new RegistryClientStatus { Running = true, SeenFrom = "203.0.113.9:51234" }, hostname);
+        Check("填的是主机名：不误报为错误，只说无法直接比对",
+            hostnameCheck is { Warning: false } && hostnameCheck.Text.Contains("主机名"), hostnameCheck?.Text);
+
+        // ---- 分发状态 ----
+        var normal = RegistryUiText.DescribeSelfDistribution(config);
+        Check("正常：说明可被其他节点探测",
+            normal is { Warning: false } && normal.Text.Contains("203.0.113.9:9000") &&
+            normal.Text.Contains("TCP + UDP"), normal?.Text);
+
+        var loopback = new RegistrarConfig
+        {
+            Enabled = true, PublicHost = "127.0.0.1", PublicPort = 9000,
+            CenterHost = "127.0.0.1", CenterPort = 9000
+        };
+        var loopbackNote = RegistryUiText.DescribeSelfDistribution(loopback);
+        Check("回环地址：明确提示不会被分发（否则其他节点测的是自己的回环 = 假线路）",
+            loopbackNote is { Warning: true } &&
+            loopbackNote.Text.Contains("不可分发") &&
+            loopbackNote.Text.Contains("不会出现在别人的链路里"), loopbackNote?.Text);
+
+        var offGrid = new RegistrarConfig { Enabled = true, Distributable = false, PublicHost = "203.0.113.9", PublicPort = 9000 };
+        var offGridNote = RegistryUiText.DescribeSelfDistribution(offGrid);
+        Check("关闭参与网状：说明不会被分发（不是错误）",
+            offGridNote is { Warning: false } && offGridNote.Text.Contains("参与网状"), offGridNote?.Text);
+
+        var noAdvertise = new RegistrarConfig
+        {
+            Enabled = true, PublicHost = "203.0.113.9", PublicPort = 9000,
+            AdvertiseTcp = false, AdvertiseUdp = false
+        };
+        var noAdvertiseNote = RegistryUiText.DescribeSelfDistribution(noAdvertise);
+        Check("两个可被探测协议都关掉：说明会出现链路但不会被发包",
+            noAdvertiseNote is { Warning: false } && noAdvertiseNote.Text.Contains("不会向本机发包"), noAdvertiseNote?.Text);
+
+        var emptyHost = new RegistrarConfig { Enabled = true, PublicPort = 9000 };
+        Check("未填外网地址：标红",
+            RegistryUiText.DescribeSelfDistribution(emptyHost) is { Warning: true });
+
+        Eq("协议文案：全开", "TCP + UDP", RegistryUiText.DescribeProtocols(true, true));
+        Eq("协议文案：仅 TCP", "仅 TCP", RegistryUiText.DescribeProtocols(true, false));
+        Eq("协议文案：仅 UDP", "仅 UDP", RegistryUiText.DescribeProtocols(false, true));
+        Eq("协议文案：都未勾选", "都未勾选", RegistryUiText.DescribeProtocols(false, false));
+
+        // ---- 节点状态与时间 ----
+        Eq("节点状态：在线+分发+认证", "在线 · 分发中 · 已认证",
+            RegistryUiText.DescribeNodeState(true, true, false, true, false));
+        Eq("节点状态：中心隐藏", "在线 · 已隐藏 · 已认证",
+            RegistryUiText.DescribeNodeState(true, true, true, true, false));
+        Eq("节点状态：对端自己关了分发", "在线 · 对端关分发 · 已认证",
+            RegistryUiText.DescribeNodeState(true, false, false, true, false));
+        Eq("节点状态：无密钥", "在线 · 分发中 · 无密钥",
+            RegistryUiText.DescribeNodeState(true, true, false, false, false));
+        Check("节点状态：疑似重复 nodeId 要显眼",
+            RegistryUiText.DescribeNodeState(true, true, false, true, true).Contains("疑似重复"));
+
+        Eq("相对时间：刚刚", "刚刚", RegistryUiText.DescribeAgo(TimeSpan.FromSeconds(30)));
+        Eq("相对时间：分钟", "3 分钟前", RegistryUiText.DescribeAgo(TimeSpan.FromMinutes(3)));
+        Eq("相对时间：小时", "2 小时前", RegistryUiText.DescribeAgo(TimeSpan.FromHours(2)));
+        Eq("相对时间：天", "4 天前", RegistryUiText.DescribeAgo(TimeSpan.FromDays(4)));
+        Eq("相对时间：时钟偏差不算负数", "刚刚", RegistryUiText.DescribeAgo(TimeSpan.FromSeconds(-30)));
+
+        var lastSeen = RegistryUiText.DescribeLastSeen(new DateTime(2026, 9, 20, 12, 0, 0, DateTimeKind.Utc),
+            new DateTime(2026, 9, 20, 12, 5, 0, DateTimeKind.Utc));
+        Check("最后心跳：本地时刻 + 相对时间",
+            lastSeen.Contains("5 分钟前") && lastSeen.Contains(":"), lastSeen);
+    }
+
+    // ---------------- 中心节点行 ----------------
+
+    private static void TestRegistryNodeRow()
+    {
+        Section("注册中心管理：节点行（分发勾选写中心）");
+
+        var node = new RegistryNode
+        {
+            NodeId = "peer-a",
+            Name = "机房B",
+            Ip = "203.0.113.10",
+            Port = 9000,
+            Tcp = true,
+            Udp = false,
+            Online = true,
+            Authenticated = true,
+            LastSeenUtc = new DateTime(2026, 9, 20, 12, 0, 0, DateTimeKind.Utc)
+        };
+
+        var calls = new List<(string NodeId, bool Hidden)>();
+        var row = RegistryNodeRow.FromNode(node, node.LastSeenUtc.AddSeconds(30),
+            (id, hidden) => { calls.Add((id, hidden)); return true; });
+
+        Eq("行：名称", "机房B", row.Name);
+        Eq("行：地址", "203.0.113.10:9000", row.Address);
+        Eq("行：协议列", "仅 TCP", row.Protocols);
+        Eq("行：默认参与分发", true, row.Distributed);
+        Check("行：状态列含在线与认证", row.State.Contains("在线") && row.State.Contains("已认证"), row.State);
+        Check("行：可写分发", row.CanDistribute);
+
+        row.Distributed = false;
+        Eq("取消分发：写中心侧 centerHidden=true", (true, true), calls.Count == 1 ? (true, calls[0].Hidden) : (false, false));
+        Eq("取消分发：回调带上 nodeId", "peer-a", calls[0].NodeId);
+        Check("取消分发后状态列显示已隐藏", row.State.Contains("已隐藏"), row.State);
+        Check("取消分发后复选框为未勾选", !row.Distributed);
+
+        // 写不进去（节点已被移除）时必须回滚显示，不能骗用户"已经隐藏了"
+        var refusing = RegistryNodeRow.FromNode(node, node.LastSeenUtc, (_, _) => false);
+        refusing.Distributed = false;
+        Check("写入失败时勾选状态回滚", refusing.Distributed, "写不进去却显示已取消勾选");
+
+        var removed = RegistryNodeRow.FromRemoved("peer-b", (_, _) => throw new InvalidOperationException("已移除的节点不该写分发"));
+        Check("已移除行有标记", removed.IsRemoved);
+        Check("已移除行不可写分发", !removed.CanDistribute);
+        Check("已移除行不勾选分发", !removed.Distributed);
+        Check("已移除行状态说明需在中心侧恢复", removed.State.Contains("恢复"), removed.State);
+        removed.Distributed = true; // 不应抛异常，也不应写中心
+        Check("已移除行写分发被忽略", !removed.Distributed);
+    }
+
+    // ---------------- 注册页（真实控件） ----------------
+
+    private static void TestRegistryPanelUi()
+    {
+        Section("注册页：真实控件的填充 / 读回 / 状态 / 节点表");
+
+        var root = Path.Combine(AppContext.BaseDirectory, ".testtmp", "panel_" + Guid.NewGuid().ToString("N"));
+
+        RunOnSta(() =>
+        {
+            var now = new DateTime(2026, 9, 20, 12, 0, 0, DateTimeKind.Utc);
+
+            var panel = new RegistryPanel();
+            Check("注册页装配成功", true);
+
+            Check("含“参与注册同步”开关", panel.FindName("EnabledCheck") is CheckBox);
+            Check("含节点名称输入框", panel.FindName("NodeNameBox") is TextBox);
+            Check("含本端外网地址输入框", panel.FindName("PublicHostBox") is TextBox);
+            Check("含注册中心地址输入框", panel.FindName("CenterHostBox") is TextBox);
+            Check("含密钥密码框", panel.FindName("SecretBox") is PasswordBox);
+            Check("含“显示密钥”开关", panel.FindName("ShowSecretCheck") is CheckBox);
+            Check("含可被 TCP 探测开关", panel.FindName("AdvertiseTcpCheck") is CheckBox);
+            Check("含可被 UDP 探测开关", panel.FindName("AdvertiseUdpCheck") is CheckBox);
+            Check("含立即注册按钮", panel.FindName("RegisterNowButton") is Button);
+            Check("含中心节点表", panel.FindName("NodeGrid") is DataGrid);
+
+            var config = new RegistrarConfig
+            {
+                Enabled = true,
+                NodeName = "机房A",
+                PublicHost = "203.0.113.9",
+                PublicPort = 9000,
+                AdvertiseUdp = true,
+                CenterHost = "203.0.113.1",
+                CenterPort = 50000,
+                Secret = "s3cret",
+                HeartbeatSeconds = 60,
+                SyncSeconds = 300,
+                RetryMs = 1000,
+                MaxRetries = 5,
+                NodeId = "0123456789abcdef0123456789abcdef"
+            };
+
+            panel.Load(config);
+
+            Eq("界面按配置填充节点名称", "机房A", ((TextBox)panel.FindName("NodeNameBox")!).Text);
+            Eq("界面按配置填充外网地址", "203.0.113.9", ((TextBox)panel.FindName("PublicHostBox")!).Text);
+            Eq("界面按配置填充外网端口", "9000", ((TextBox)panel.FindName("PublicPortBox")!).Text);
+            Eq("界面按配置填充中心地址", "203.0.113.1", ((TextBox)panel.FindName("CenterHostBox")!).Text);
+            Eq("界面按配置填充密钥", "s3cret", ((PasswordBox)panel.FindName("SecretBox")!).Password);
+            Eq("界面显示节点身份", config.NodeId, ((TextBlock)panel.FindName("NodeIdText")!).Text);
+            Check("密钥默认隐藏", ((PasswordBox)panel.FindName("SecretBox")!).Visibility == Visibility.Visible &&
+                                  ((TextBox)panel.FindName("SecretTextBox")!).Visibility == Visibility.Collapsed);
+
+            // 改界面 → 读回配置
+            ((TextBox)panel.FindName("NodeNameBox")!).Text = "机房A-新";
+            ((TextBox)panel.FindName("PublicPortBox")!).Text = "9100";
+            ((CheckBox)panel.FindName("AdvertiseTcpCheck")!).IsChecked = false;
+
+            var target = new RegistrarConfig();
+            Check("界面值可读回配置", panel.TryReadInto(target, out var readError), readError);
+            Eq("读回：节点名称", "机房A-新", target.NodeName);
+            Eq("读回：外网端口", 9100, target.PublicPort);
+            Check("读回：取消勾选“可被 TCP 探测”生效", !target.AdvertiseTcp && target.AdvertiseUdp);
+            Eq("读回：节点身份沿用配置（不会每次保存换身份）", config.NodeId, target.NodeId);
+
+            // 非法输入：拦下且不改动已有配置
+            ((TextBox)panel.FindName("NodeNameBox")!).Text = "   ";
+            var keepName = target.NodeName;
+            var keepPort = target.PublicPort;
+            Check("非法输入被界面拦下", !panel.TryReadInto(target, out var badError));
+            Check("拦下时给出可读原因", badError.Contains("节点名称"), badError);
+            Eq("拦下时节点名称未被改写", keepName, target.NodeName);
+            Eq("拦下时端口未被改写", keepPort, target.PublicPort);
+
+            ((TextBox)panel.FindName("NodeNameBox")!).Text = "机房A-新";
+
+            // 密钥“显示”切换：两个输入框必须同步，不能一个显示旧值
+            ((CheckBox)panel.FindName("ShowSecretCheck")!).IsChecked = true;
+            var secretText = (TextBox)panel.FindName("SecretTextBox")!;
+            Eq("切到“显示”后文本框拿到密钥", "s3cret", secretText.Text);
+            Eq("“显示”时密码框隐藏", Visibility.Collapsed, ((PasswordBox)panel.FindName("SecretBox")!).Visibility);
+            secretText.Text = "s3cret2";
+            Eq("改文本框会同步回密码框", "s3cret2", ((PasswordBox)panel.FindName("SecretBox")!).Password);
+            Eq("“显示”状态下以文本框为权威值", "s3cret2",
+                panel.TryReadInto(target, out _) ? target.Secret : "读回失败");
+
+            // 状态区
+            panel.ShowStatus(new RegistryClientStatus
+            {
+                Running = true,
+                LastSuccessUtc = now.AddSeconds(-30),
+                Revision = 138,
+                NodeCount = 6,
+                SeenFrom = "203.0.113.9:51234"
+            }, config, now);
+
+            var connection = (TextBlock)panel.FindName("ConnectionText")!;
+            var selfCheck = (TextBlock)panel.FindName("SelfCheckText")!;
+            var distribution = (TextBlock)panel.FindName("SelfDistributionText")!;
+            var centerSection = (Border)panel.FindName("CenterSection")!;
+
+            Check("状态区显示中心地址与 revision",
+                connection.Text.Contains("203.0.113.1:50000") && connection.Text.Contains("rev 138"), connection.Text);
+            Check("状态区显示对外地址比对结果", selfCheck.Text.Contains("51234"), selfCheck.Text);
+            Check("状态区显示本节点分发状态", distribution.Text.Contains("203.0.113.9:9000"), distribution.Text);
+            Eq("未承担中心角色时隐藏中心管理区", Visibility.Collapsed, centerSection.Visibility);
+            Check("未承担中心角色时不显示节点表内容",
+                panel.FindName("NodeGrid") is DataGrid idleGrid && (idleGrid.ItemsSource as ICollection)?.Count == 0);
+
+            config.ServeAsCenter = true;
+            panel.ShowStatus(null, config, now);
+            Eq("承担中心角色时显示中心管理区", Visibility.Visible, centerSection.Visibility);
+            Check("未运行时状态区提示需先启动测试",
+                connection.Text.Contains("未运行"), connection.Text);
+
+            // 中心节点表：真实 RegistryStore
+            Directory.CreateDirectory(root);
+            var store = new RegistryStore(Path.Combine(root, "registry.json"), 60);
+            store.Upsert(new RegisterMessage
+            {
+                NodeId = "peer-a", Name = "机房B", Ip = "203.0.113.10", Port = 9000, Tcp = true, Udp = true
+            }, authenticated: true);
+            store.Upsert(new RegisterMessage
+            {
+                NodeId = "peer-b", Name = "机房C", Ip = "203.0.113.11", Port = 9000, Tcp = false, Udp = true
+            }, authenticated: false);
+            store.Save();
+
+            panel.ShowCenter(store, now, force: true);
+
+            var grid = (DataGrid)panel.FindName("NodeGrid")!;
+            var rows = ((IEnumerable)grid.ItemsSource!).Cast<RegistryNodeRow>().ToList();
+            Eq("节点表列出中心清单里的全部节点", 2, rows.Count);
+            Check("节点表显示协议列", rows.Any(r => r.Protocols == "TCP + UDP") && rows.Any(r => r.Protocols == "仅 UDP"),
+                string.Join(" / ", rows.Select(r => r.Protocols)));
+            Check("未认证的节点被标出", rows.Any(r => r.State.Contains("无密钥")),
+                string.Join(" / ", rows.Select(r => r.State)));
+
+            // 分发勾选写中心侧（不勾选 → centerHidden）
+            var peerB = rows.First(r => r.NodeId == "peer-a");
+            peerB.Distributed = false;
+            Check("取消分发写入中心清单",
+                store.Nodes.First(n => n.NodeId == "peer-a").CenterHidden && !store.Nodes.First(n => n.NodeId == "peer-a").IsDistributed);
+            Check("取消分发后不会再被分发出去（快照里没有它）",
+                store.BuildSnapshot().All(n => n.NodeId != "peer-a"));
+            Check("取消分发后状态列变成已隐藏", peerB.State.Contains("已隐藏"), peerB.State);
+
+            // 移除节点：确认框必须说明会从所有子节点的链路里消失
+            var confirmMessage = "";
+            var alerts = new List<string>();
+            panel.Confirm = (message, _) => { confirmMessage = message; return true; };
+            panel.Alert = (message, _) => alerts.Add(message);
+
+            grid.SelectedItems.Clear();
+            grid.SelectedItems.Add(peerB);
+            ((Button)panel.FindName("RemoveNodeButton")!).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+            Check("移除确认框说明会从所有子节点的链路里移除", confirmMessage.Contains("所有子节点"), confirmMessage);
+            Check("移除后节点不在清单里", store.Nodes.All(n => n.NodeId != "peer-a"));
+            Check("移除后进入移除名单（心跳也加不回来）", store.IsRemoved("peer-a"));
+
+            rows = ((IEnumerable)grid.ItemsSource!).Cast<RegistryNodeRow>().ToList();
+            Check("已移除的节点仍列在表里（否则无法恢复）", rows.Any(r => r.NodeId == "peer-a" && r.IsRemoved),
+                string.Join(" / ", rows.Select(r => r.NodeId + (r.IsRemoved ? "(已移除)" : ""))));
+            Check("已移除行的分发勾选框不可用",
+                ((DataGrid)panel.FindName("NodeGrid")!).ItemsSource is IEnumerable list &&
+                list.Cast<RegistryNodeRow>().Any(r => r.IsRemoved && !r.CanDistribute));
+            Check("恢复按钮在存在移除名单时可用", ((Button)panel.FindName("RestoreNodeButton")!).IsEnabled);
+            Check("移除名单文案列出被移除的节点",
+                ((TextBlock)panel.FindName("RemovedNodesText")!).Text.Contains("peer-a"),
+                ((TextBlock)panel.FindName("RemovedNodesText")!).Text);
+
+            // 恢复
+            grid.SelectedItems.Clear();
+            grid.SelectedItems.Add(rows.First(r => r.IsRemoved));
+            ((Button)panel.FindName("RestoreNodeButton")!).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Check("恢复后移除名单清空", !store.IsRemoved("peer-a"));
+            Check("恢复后给出提示", alerts.Any(a => a.Contains("恢复")), string.Join(" / ", alerts));
+
+            // 操作按钮的事件
+            var saveRequested = 0;
+            var registerRequested = 0;
+            panel.SaveRequested += () => saveRequested++;
+            panel.RegisterRequested += () => registerRequested++;
+
+            ((Button)panel.FindName("SaveRegistryButton")!).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            ((Button)panel.FindName("RegisterNowButton")!).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            ((Button)panel.FindName("SyncNowButton")!).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Eq("“保存配置”交给主窗口统一落盘", 1, saveRequested);
+            Eq("“立即注册/立即同步”触发注册请求", 2, registerRequested);
+
+            // 未运行时点“立即注册/移除”要有可读提示，而不是静默失败
+            var idlePanel = new RegistryPanel();
+            var idleAlerts = new List<string>();
+            idlePanel.Alert = (message, _) => idleAlerts.Add(message);
+            idlePanel.ShowCenter(null, now, force: true);
+            ((Button)idlePanel.FindName("RegisterNowButton")!).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            ((Button)idlePanel.FindName("RemoveNodeButton")!).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Check("注册中心未运行时移除节点给出提示",
+                idleAlerts.Any(a => a.Contains("未运行")), string.Join(" / ", idleAlerts));
+
+            // 排版：注册页自身的文本/控件不能被横向裁剪（纵向由 ScrollViewer 承担）
+            var panelProblems = new List<string>();
+            AuditPanelWidth(panel, 1320, panelProblems);
+            Check("注册页无横向裁剪", panelProblems.Count == 0, string.Join("；", panelProblems));
+        }, "注册页断言");
+
+        try { Directory.Delete(root, true); } catch { }
+    }
+
+    /// <summary>
+    /// 对已在真实窗口里的子树做**只读**横向审查（不改动布局）：
+    /// 窗口级的 Report 会跳过 TabControl 内部，因此注册页要单独看一次。
+    /// </summary>
+    private static void AuditNestedWidth(FrameworkElement root, List<string> problems)
+    {
+        foreach (var child in EnumerateStatic(root))
+        {
+            if (child is DataGrid or TabControl) continue;
+            if (child is not FrameworkElement element || element.Visibility != Visibility.Visible) continue;
+            if (element.ActualWidth <= 0) continue;
+
+            if (child is TextBlock text && !string.IsNullOrWhiteSpace(text.Text) &&
+                ContentWidth(text) > text.ActualWidth + 1)
+            {
+                problems.Add($"文本被裁剪：“{Shorten(text.Text)}” 需要 {ContentWidth(text):F0}px，只有 {text.ActualWidth:F0}px");
+            }
+
+            if (child is CheckBox or Button or TextBox or PasswordBox && ContentWidth(element) > element.ActualWidth + 1)
+            {
+                problems.Add($"{child.GetType().Name}“{Describe(child)}”宽度不足：" +
+                             $"需要 {ContentWidth(element):F0}px，只有 {element.ActualWidth:F0}px");
+            }
+        }
+    }
+
+    /// <summary>
+    /// 注册页的横向排版审查：只查宽度方向的裁剪。
+    /// 它包在 ScrollViewer 里，纵向超出是设计允许的（可以滚动），所以不能复用带边界检查的那套。
+    /// </summary>
+    private static void AuditPanelWidth(FrameworkElement root, double width, List<string> problems)
+    {
+        root.Measure(new Size(width, 4000));
+        root.Arrange(new Rect(0, 0, width, 4000));
+        root.UpdateLayout();
+
+        foreach (var child in EnumerateStatic(root))
+        {
+            if (child is DataGrid or TabControl) continue;
+            if (child is not FrameworkElement element || element.Visibility != Visibility.Visible) continue;
+            if (element.ActualWidth <= 0) continue;
+
+            if (child is TextBlock text && !string.IsNullOrWhiteSpace(text.Text) &&
+                ContentWidth(text) > text.ActualWidth + 1)
+            {
+                problems.Add($"文本被裁剪：“{Shorten(text.Text)}” 需要 {ContentWidth(text):F0}px，只有 {text.ActualWidth:F0}px");
+            }
+
+            if (child is CheckBox or Button or TextBox or PasswordBox && ContentWidth(element) > element.ActualWidth + 1)
+            {
+                problems.Add($"{child.GetType().Name}“{Describe(child)}”宽度不足：" +
+                             $"需要 {ContentWidth(element):F0}px，只有 {element.ActualWidth:F0}px");
+            }
+        }
+    }
+
+    // ---------------- 主窗口联动 ----------------
+
+    private static void TestRegistryMainWindowUi()
+    {
+        Section("注册页与链路页联动：快照应用 / 本地停测 / 只读与删除保护 / 落盘");
+
+        var root = Path.Combine(AppContext.BaseDirectory, ".testtmp", "registry_ui_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        var previousOverride = ConfigManager.OverridePath;
+        ConfigManager.OverridePath = Path.Combine(root, "appsettings.json");
+
+        ConfigManager.Save(new AppConfig
+        {
+            ListenPort = 9000,
+            IntervalMs = 1000,
+            TimeoutMs = 1000,
+            Links =
+            {
+                new LinkConfig { Name = "本地手工链路", Host = "192.0.2.50", Port = 9100 }
+            },
+            Registrar = new RegistrarConfig
+            {
+                Enabled = true,
+                ServeAsCenter = true,
+                NodeId = "self-node",
+                NodeName = "本机",
+                PublicHost = "203.0.113.9",
+                PublicPort = 9000,
+                CenterHost = "127.0.0.1",
+                CenterPort = 9000,
+                Secret = "s3cret",
+                HeartbeatSeconds = 60,
+                SyncSeconds = 60
+            }
+        });
+
+        RunOnSta(() =>
+        {
+            var window = new MainWindow();
+
+            Check("窗口里存在「注册中心」标签页",
+                window.FindName("MainTabs") is TabControl tabs &&
+                tabs.Items.OfType<TabItem>().Any(t => Equals(t.Header, "注册中心")));
+
+            var panel = window.FindName("RegistryTabPanel") as RegistryPanel;
+            Check("标签页里挂的是注册页控件", panel is not null);
+
+            var linksGrid = (DataGrid)window.FindName("LinksGrid")!;
+            Check("链路配置页新增「来源」列", linksGrid.Columns.Any(c => Equals(c.Header, "来源")));
+            Check("「校验」列绑定到备注（本地停测/自动维护）",
+                linksGrid.Columns.Any(c => Equals(c.Header, "校验") &&
+                    (c as DataGridTextColumn)?.Binding is Binding binding &&
+                    binding.Path.Path == nameof(LinkRow.Diagnosis)));
+
+            Check("注册页按配置回填（含本端外网地址）",
+                ((TextBox)panel!.FindName("PublicHostBox")!).Text == "203.0.113.9",
+                ((TextBox)panel.FindName("PublicHostBox")!).Text);
+            Check("承担中心角色时中心管理区可见",
+                ((Border)panel.FindName("CenterSection")!).Visibility == Visibility.Visible);
+
+            var linkRows = (IList)GetPrivateField(window, "_linkRows")!;
+            Eq("启动时只有手工链路", 1, linkRows.Count);
+            Check("手工链路的来源显示为“本地”", ((LinkRow)linkRows[0]!).SourceText == "本地");
+
+            // ---- 应用一次中心快照 ----
+            var snapshot = new List<NodeSnapshot>
+            {
+                new() { NodeId = "self-node", Name = "本机", Ip = "203.0.113.9", Port = 9000, Tcp = true, Udp = true },
+                new() { NodeId = "peer-a", Name = "机房B", Ip = "203.0.113.10", Port = 9000, Tcp = true, Udp = true },
+                new() { NodeId = "peer-b", Name = "机房C", Ip = "203.0.113.11", Port = 9000, Tcp = false, Udp = true },
+                new() { NodeId = "peer-loop", Name = "回环节点", Ip = "127.0.0.1", Port = 9000, Tcp = true, Udp = true }
+            };
+
+            ApplySnapshot(window, snapshot);
+
+            Eq("快照应用后：手工链路 + 2 条注册链路", 3, linkRows.Count);
+            Check("没把自己加成链路", linkRows.Cast<LinkRow>().All(r => r.NodeId != "self-node"));
+            Check("跳过了回环地址（否则测的是自己的回环 = 假线路）",
+                linkRows.Cast<LinkRow>().All(r => r.NodeId != "peer-loop"));
+            Check("注册链路的来源显示为“注册中心”",
+                linkRows.Cast<LinkRow>().Where(r => r.IsRegistry).All(r => r.SourceText == "注册中心"));
+            Check("注册链路带上中心下发的目标",
+                linkRows.Cast<LinkRow>().Any(r => r.NodeId == "peer-a" && r.Host == "203.0.113.10" && r.Port == 9000));
+            Check("协议按对端宣告（peer-b 只宣告 UDP）",
+                linkRows.Cast<LinkRow>().First(r => r.NodeId == "peer-b") is { Tcp: false, Udp: true });
+            Check("正常注册链路的备注说明来自注册中心",
+                linkRows.Cast<LinkRow>().First(r => r.NodeId == "peer-a").Diagnosis.Contains("注册中心"),
+                linkRows.Cast<LinkRow>().First(r => r.NodeId == "peer-a").Diagnosis);
+
+            // 新链路必须立刻进入探测集合（网格测试自动发现的关键：不必重启测试）
+            var liveLinks = (LinkConfig[])GetPrivateField(window, "_liveLinks")!;
+            Eq("新链路立刻进入探测集合（无需重启测试）", 3, liveLinks.Length);
+            Check("探测集合里包含注册链路", liveLinks.Any(l => l.Source == LinkSources.Registry));
+
+            // 落盘：注册链路必须带上来源，否则下次启动会变成手工链路
+            var saved = ConfigManager.Load(out var loadError);
+            Eq("自动落盘成功", "", loadError ?? "");
+            var savedRegistry = saved.Links.Where(l => l.Source == LinkSources.Registry).ToList();
+            Eq("落盘后注册链路仍在", 2, savedRegistry.Count);
+            Check("落盘保留了 NodeId 与 Source",
+                savedRegistry.All(l => l.NodeId.Length > 0 && l.Source == LinkSources.Registry));
+            Check("落盘保留了手工链路", saved.Links.Any(l => l.Source == LinkSources.Manual && l.Name == "本地手工链路"));
+
+            // ---- 本地停测（注册链路） ----
+            var peerA = linkRows.Cast<LinkRow>().First(r => r.NodeId == "peer-a");
+            peerA.Tcp = false;
+            peerA.Udp = false;
+            Check("两条协议都取消勾选 = 本地停测意图", peerA.LocalDisabled);
+            Eq("本地停测后“生效”为不发包", "不发包", peerA.Effective);
+            Check("本地停测在备注列有说明", peerA.Diagnosis.Contains("本地已停测"), peerA.Diagnosis);
+
+            // 关键：本地停测意图不能被下一次同步覆盖掉。
+            // 这一轮同步确实会动到这一行（对端改名了），因此不是"没变化所以碰巧没被覆盖"。
+            var renamed = snapshot
+                .Select(n => n.NodeId == "peer-a"
+                    ? new NodeSnapshot
+                    {
+                        NodeId = n.NodeId, Name = "机房B-改名", Ip = n.Ip, Port = n.Port, Tcp = n.Tcp, Udp = n.Udp
+                    }
+                    : n)
+                .ToList();
+
+            ApplySnapshot(window, renamed);
+            peerA = linkRows.Cast<LinkRow>().First(r => r.NodeId == "peer-a");
+            Eq("同步确实改动了这一行（对端改名）", "机房B-改名", peerA.Name);
+            Check("同步不会覆盖本地停测意图", peerA.LocalDisabled, "本地停测被同步改回来了");
+            Check("同步后该链路仍不发包", !peerA.Tcp && !peerA.Udp);
+            var savedAfterSync = ConfigManager.Load(out _);
+            Check("本地停测意图被落盘",
+                savedAfterSync.Links.First(l => l.NodeId == "peer-a").LocalDisabled);
+
+            peerA.Tcp = true;
+            Check("重新勾选任一协议即恢复本地探测", !peerA.LocalDisabled);
+
+            // ---- 注册链路的名称/主机/端口只读 ----
+            var nameColumn = linksGrid.Columns.First(c => Equals(c.Header, "名称"));
+            var hostColumn = linksGrid.Columns.First(c => Equals(c.Header, "主机 / IP"));
+            var tcpColumn = linksGrid.Columns.First(c => Equals(c.Header, "TCP"));
+
+            Check("注册链路的名称列禁止编辑",
+                BeginningEditCancelled(window, peerA, nameColumn));
+            Check("注册链路的主机列禁止编辑",
+                BeginningEditCancelled(window, peerA, hostColumn));
+            Check("注册链路的端口列禁止编辑",
+                BeginningEditCancelled(window, peerA, linksGrid.Columns.First(c => Equals(c.Header, "端口"))));
+            Check("注册链路的 TCP 勾选仍可改（这就是唯一的本地开关）",
+                !BeginningEditCancelled(window, peerA, tcpColumn));
+
+            var manualRow = linkRows.Cast<LinkRow>().First(l => !l.IsRegistry);
+            Check("手工链路照常可编辑名称", !BeginningEditCancelled(window, manualRow, nameColumn));
+
+            // ---- 删除注册链路要被拦下并给出正确出路 ----
+            var alerts = new List<string>();
+            SetPrivateField(window, "_alert", (Action<string, string>)((message, _) => alerts.Add(message)));
+            SetPrivateField(window, "_confirmDelete", (Func<string, string, bool>)((_, _) =>
+                throw new InvalidOperationException("注册链路不该走到删除确认")));
+
+            linksGrid.SelectedItems.Clear();
+            linksGrid.SelectedItems.Add(peerA);
+            InvokePrivateHandler(window, "DeleteLink_Click");
+
+            Check("删除注册链路被拦下", linkRows.Cast<LinkRow>().Any(r => r.NodeId == "peer-a"));
+            Check("拦下时说明要去注册中心移除并提示本地停测的做法",
+                alerts.Any(a => a.Contains("注册中心") && a.Contains("取消勾选")), string.Join(" / ", alerts));
+
+            // ---- 中心侧移除节点 → 其他节点的链路消失 ----
+            var afterRemoval = snapshot.Where(n => n.NodeId != "peer-b").ToList();
+            ApplySnapshot(window, afterRemoval);
+            Eq("中心移除节点后链路消失", 2, linkRows.Count);
+            Check("消失的是被移除的那个节点",
+                linkRows.Cast<LinkRow>().All(r => r.NodeId != "peer-b"));
+            Check("手工链路不受任何同步影响",
+                linkRows.Cast<LinkRow>().Any(r => !r.IsRegistry && r.Name == "本地手工链路"));
+
+            window.Close();
+        }, "主窗口注册联动断言");
+
+        ConfigManager.OverridePath = previousOverride;
+        try { Directory.Delete(root, true); } catch { }
+    }
+
+    private static void ApplySnapshot(MainWindow window, IReadOnlyList<NodeSnapshot> nodes)
+    {
+        var method = typeof(MainWindow).GetMethod("ApplyRegistrySnapshot",
+                         BindingFlags.NonPublic | BindingFlags.Instance)
+                     ?? throw new InvalidOperationException("未找到 ApplyRegistrySnapshot");
+
+        try
+        {
+            method.Invoke(window, new object[] { nodes });
+        }
+        catch (TargetInvocationException ex) when (ex.InnerException is not null)
+        {
+            throw ex.InnerException;
+        }
+    }
+
+    /// <summary>真跑一次 BeginningEdit 处理器，返回它是否取消了编辑。</summary>
+    private static bool BeginningEditCancelled(MainWindow window, LinkRow row, DataGridColumn column)
+    {
+        var grid = (DataGrid)window.FindName("LinksGrid")!;
+        var container = new DataGridRow { Item = row };
+        var args = new DataGridBeginningEditEventArgs(column, container, new RoutedEventArgs());
+
+        InvokePrivateHandlerWith(window, "LinksGrid_BeginningEdit", grid, args);
+        return args.Cancel;
+    }
+
+    // ---------------- 非中心节点：兼容矩阵最后一行 ----------------
+
+    private static async Task TestRegistryNonCenterAsync()
+    {
+        Section("注册协议：向非中心节点发注册 → 明确回 unsupported（不重试风暴）");
+
+        var port = FindBindablePort();
+        var server = new ProbeServer(port);
+        server.ProtocolHandler = (request, length, _, ct) =>
+            RegistryCenterService.RespondUnsupportedAsync("preshared", request, length, ct);
+
+        try
+        {
+            server.Start();
+        }
+        catch
+        {
+            Check("非中心节点启动", false, "端口不可绑定");
+            server.Dispose();
+            return;
+        }
+
+        using var client = new RegistryClient(new RegistryClientOptions
+        {
+            NodeId = "node-x",
+            NodeName = "节点X",
+            PublicHost = "203.0.113.30",
+            PublicPort = 9000,
+            CenterHost = "127.0.0.1",
+            CenterPort = port,
+            Secret = "preshared",
+            HeartbeatSeconds = 15,
+            SyncSeconds = 15,
+            RetryMs = 200,
+            MaxRetries = 1,
+            LogDirectory = Path.Combine(AppContext.BaseDirectory, ".testtmp", "registry_logs")
+        });
+
+        Check("客户端启动", client.Start());
+
+        var ok = await client.RegisterNowAsync();
+        Check("把普通节点当中心会被明确拒绝", !ok);
+        Check("状态里给出 unsupported 与可读原因",
+            client.Status.LastError?.Contains("unsupported") == true &&
+            client.Status.LastError.Contains("不是注册中心"), client.Status.LastError);
+        Check("客户端仍保持运行（不影响本机探测）", client.Status.Running);
+
+        // 终态错误不做重传风暴：连续两次请求不应叠加超时重试
+        var started = DateTime.UtcNow;
+        await client.RegisterNowAsync();
+        var elapsed = DateTime.UtcNow - started;
+        Check("终态错误不触发重传风暴（单次请求 < 1.5 秒）", elapsed < TimeSpan.FromSeconds(1.5),
+            $"耗时 {elapsed.TotalMilliseconds:F0}ms");
+
+        client.Stop();
+        server.Dispose();
+    }
+
+    // ---------------- STA 辅助 ----------------
+
+    private static void RunOnSta(Action action, string label, int timeoutSeconds = 90)
+    {
+        string? error = null;
+
+        var thread = new Thread(() =>
+        {
+            try { action(); }
+            catch (Exception ex) { error = ex.ToString(); }
+        });
+
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.IsBackground = true;
+        thread.Start();
+
+        if (!thread.Join(TimeSpan.FromSeconds(timeoutSeconds)))
+        {
+            Check(label + "在超时内完成", false, "超时（可能弹出了模态对话框）");
+            return;
+        }
+
+        Check(label + "未抛异常", error is null, error);
+    }
+
+    /// <summary>带参数地调用主窗口的私有处理器（<see cref="InvokePrivateHandler(object,string)"/> 只支持单参数）。</summary>
+    private static void InvokePrivateHandlerWith(object target, string name, params object[] args)
+    {
+        var methods = target.GetType().GetMethods(BindingFlags.NonPublic | BindingFlags.Instance)
+            .Where(m => m.Name == name && m.GetParameters().Length == args.Length)
+            .ToList();
+
+        if (methods.Count == 0) throw new InvalidOperationException("未找到处理器：" + name);
+
+        try
+        {
+            methods[0].Invoke(target, args);
+        }
+        catch (TargetInvocationException ex) when (ex.InnerException is not null)
+        {
+            throw ex.InnerException;
+        }
+    }
+}

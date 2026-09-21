@@ -227,6 +227,9 @@ public sealed class LinkRow : INotifyPropertyChanged
     private bool _globalUdp = true;
     private string _problem = "";
     private bool _isValid = true;
+    private string _source = LinkSources.Manual;
+    private string _nodeId = "";
+    private bool _localDisabled;
 
     public string Name { get => _name; set => Set(ref _name, value); }
     public string Host { get => _host; set => Set(ref _host, value); }
@@ -269,9 +272,54 @@ public sealed class LinkRow : INotifyPropertyChanged
     }
 
     /// <summary>校验失败的原因（空字符串 = 通过）。</summary>
-    public string Problem { get => _problem; private set => Set(ref _problem, value); }
+    public string Problem
+    {
+        get => _problem;
+        private set { if (Set(ref _problem, value)) Raise(nameof(Diagnosis)); }
+    }
 
-    public bool IsValid { get => _isValid; private set => Set(ref _isValid, value); }
+    public bool IsValid
+    {
+        get => _isValid;
+        private set { if (Set(ref _isValid, value)) Raise(nameof(Diagnosis)); }
+    }
+
+    // ---- 来源（注册中心同步维护的链路） ----
+
+    /// <summary>链路来源：<see cref="LinkSources.Manual"/> 或 <see cref="LinkSources.Registry"/>。</summary>
+    public string Source { get => _source; private set { if (Set(ref _source, value)) RaiseSource(); } }
+
+    /// <summary>注册来源链路的来源节点身份。</summary>
+    public string NodeId { get => _nodeId; private set => Set(ref _nodeId, value); }
+
+    /// <summary>true = 这条链路由注册中心同步维护（名称/主机/端口禁止本地修改）。</summary>
+    public bool IsRegistry => _source == LinkSources.Registry;
+
+    public string SourceText => IsRegistry ? "注册中心" : "本地";
+
+    /// <summary>
+    /// 本地停测意图（规格 §8.5）：注册链路的 TCP 与 UDP 都被取消勾选时置位，
+    /// 同步不会把它覆盖掉，重新勾选任一协议即恢复。
+    /// </summary>
+    public bool LocalDisabled
+    {
+        get => _localDisabled;
+        set { if (Set(ref _localDisabled, value)) Raise(nameof(Diagnosis)); }
+    }
+
+    /// <summary>
+    /// 「校验」列的显示文本：错误优先，其次给出注册链路的备注
+    /// （本地停测 / 由中心自动维护），避免这一列在正常时整片空白。
+    /// </summary>
+    public string Diagnosis
+    {
+        get
+        {
+            if (!IsValid) return Problem;
+            if (!IsRegistry) return Problem;
+            return LocalDisabled ? "本地已停测（不会被同步覆盖）" : "来自注册中心（自动维护）";
+        }
+    }
 
     public int Port => int.TryParse(PortText?.Trim(), out var port) ? port : 0;
 
@@ -279,23 +327,41 @@ public sealed class LinkRow : INotifyPropertyChanged
 
     public string Display => string.IsNullOrWhiteSpace(Name) ? Target : $"{Name.Trim()}（{Target}）";
 
+    /// <summary>
+    /// 写回配置。必须带上来源字段：否则界面保存一次就会把注册链路变成手工链路
+    /// （来源丢失 → 下一次同步把它当成"多出来的注册链路"删掉，或本地改动被当成权威值）。
+    /// </summary>
     public LinkConfig ToConfig() => new()
     {
         Name = Name.Trim(),
         Host = Host.Trim(),
         Port = Port,
         Tcp = Tcp,
-        Udp = Udp
+        Udp = Udp,
+        Source = Source,
+        NodeId = NodeId,
+        LocalDisabled = LocalDisabled
     };
 
-    public static LinkRow FromConfig(LinkConfig link) => new()
+    public static LinkRow FromConfig(LinkConfig link)
     {
-        Name = link.Name,
-        Host = link.Host,
-        PortText = link.Port.ToString(),
-        Tcp = link.Tcp,
-        Udp = link.Udp
-    };
+        var row = new LinkRow();
+        row.ApplyFrom(link);
+        return row;
+    }
+
+    /// <summary>用配置（或注册中心下发的内容）刷新本行。协议勾选会被覆盖，来源字段一并带上。</summary>
+    public void ApplyFrom(LinkConfig link)
+    {
+        Source = link.Source;
+        NodeId = link.NodeId;
+        Name = link.Name;
+        Host = link.Host;
+        PortText = link.Port.ToString();
+        Tcp = link.Tcp;
+        Udp = link.Udp;
+        LocalDisabled = link.LocalDisabled;
+    }
 
     /// <summary>用与配置文件校验完全相同的规则校验本行。</summary>
     public bool Revalidate()
@@ -331,6 +397,13 @@ public sealed class LinkRow : INotifyPropertyChanged
 
     private void Raise(string? name)
         => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+
+    private void RaiseSource()
+    {
+        Raise(nameof(IsRegistry));
+        Raise(nameof(SourceText));
+        Raise(nameof(Diagnosis));
+    }
 }
 
 /// <summary>

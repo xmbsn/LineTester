@@ -1,6 +1,7 @@
 <Window x:Class="LineTester.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:views="clr-namespace:LineTester.Views"
         Title="机房线路稳定性测试工具" Height="880" Width="1360"
         MinHeight="660" MinWidth="1120"
         Background="#F5F6F8"
@@ -408,10 +409,15 @@
 
                     <DataGrid x:Name="LinksGrid" Grid.Row="1" IsReadOnly="False"
                               SelectionMode="Extended"
-                              ToolTip="直接双击单元格编辑；名称、主机/IP、端口都会实时校验。TCP 与 UDP 都不勾选表示这条链路不主动探测（对端是纯服务端，或临时停测而不想删掉配置）">
+                              BeginningEdit="LinksGrid_BeginningEdit"
+                              ToolTip="直接双击单元格编辑；名称、主机/IP、端口都会实时校验。TCP 与 UDP 都不勾选表示这条链路不主动探测（对端是纯服务端，或临时停测而不想删掉配置）。来源为“注册中心”的链路由中心自动维护，名称/主机/端口只读">
                         <DataGrid.RowStyle>
                             <Style TargetType="DataGridRow" BasedOn="{StaticResource {x:Type DataGridRow}}">
                                 <Style.Triggers>
+                                    <!-- 顺序有意义：校验失败的红字放在后面，避免被"注册链路"的颜色盖掉 -->
+                                    <DataTrigger Binding="{Binding IsRegistry}" Value="True">
+                                        <Setter Property="Foreground" Value="#463C8A"/>
+                                    </DataTrigger>
                                     <DataTrigger Binding="{Binding IsValid}" Value="False">
                                         <Setter Property="Background" Value="#FDECEA"/>
                                         <Setter Property="Foreground" Value="#B3261E"/>
@@ -438,11 +444,13 @@
                             <DataGridCheckBoxColumn Header="UDP"
                                                     Binding="{Binding Udp, UpdateSourceTrigger=PropertyChanged}"
                                                     Width="60"/>
+                            <DataGridTextColumn Header="来源" Binding="{Binding SourceText}" Width="80"
+                                                IsReadOnly="True"/>
                             <DataGridTextColumn Header="生效（实际发包）" Binding="{Binding Effective}" Width="130"
                                                 IsReadOnly="True"
                                                 HeaderStyle="{StaticResource NumberHeader}"
                                                 ElementStyle="{StaticResource NumberCell}"/>
-                            <DataGridTextColumn Header="校验" Binding="{Binding Problem}" Width="*"
+                            <DataGridTextColumn Header="校验" Binding="{Binding Diagnosis}" Width="*"
                                                 MinWidth="200" IsReadOnly="True"/>
                         </DataGrid.Columns>
                     </DataGrid>
@@ -450,6 +458,10 @@
                     <TextBlock x:Name="LinkSummary" Grid.Row="2" Margin="2,8,0,0"
                                Foreground="#5F6368" TextWrapping="Wrap"/>
                 </Grid>
+            </TabItem>
+
+            <TabItem x:Name="RegistryTab" Header="注册中心">
+                <views:RegistryPanel x:Name="RegistryTabPanel"/>
             </TabItem>
         </TabControl>
 

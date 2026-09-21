@@ -1,0 +1,299 @@
+<UserControl x:Class="LineTester.Views.RegistryPanel"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             FontFamily="Microsoft YaHei UI, Segoe UI" FontSize="13">
+
+    <!--
+        资源必须在本文件里再声明一遍：UserControl 是独立解析的，
+        MainWindow.Resources 里的隐式样式不会作用到它的子元素
+        （隐式样式在元素初始化时解析，那一刻用户控件还没挂到窗口树上）。
+        这里只复制注册页用到的几个键，配色与主窗口保持一致。
+    -->
+    <UserControl.Resources>
+        <Style x:Key="RegCard" TargetType="Border">
+            <Setter Property="Background" Value="White"/>
+            <Setter Property="BorderBrush" Value="#E1E4E8"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="6"/>
+            <Setter Property="Padding" Value="14,12"/>
+            <Setter Property="Margin" Value="0,0,0,10"/>
+        </Style>
+
+        <Style x:Key="RegTitle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#202124"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Margin" Value="0,0,0,8"/>
+        </Style>
+
+        <Style x:Key="RegLabel" TargetType="TextBlock">
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Foreground" Value="#3C4043"/>
+            <Setter Property="Margin" Value="0,0,6,0"/>
+        </Style>
+
+        <Style x:Key="RegBox" TargetType="TextBox">
+            <Setter Property="Height" Value="26"/>
+            <Setter Property="Padding" Value="6,0"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="BorderBrush" Value="#DADCE0"/>
+            <Setter Property="Margin" Value="0,0,18,8"/>
+        </Style>
+
+        <Style x:Key="RegCheck" TargetType="CheckBox">
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Foreground" Value="#202124"/>
+            <Setter Property="Margin" Value="0,0,18,6"/>
+        </Style>
+
+        <Style x:Key="RegHint" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#5F6368"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="Margin" Value="0,4,0,0"/>
+        </Style>
+
+        <Style x:Key="RegButton" TargetType="Button">
+            <Setter Property="Padding" Value="14,6"/>
+            <Setter Property="MinWidth" Value="88"/>
+            <Setter Property="Margin" Value="0,0,8,0"/>
+            <Setter Property="Foreground" Value="#202124"/>
+            <Setter Property="Background" Value="White"/>
+            <Setter Property="BorderBrush" Value="#DADCE0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" CornerRadius="4" SnapsToDevicePixels="True"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="1">
+                            <ContentPresenter Margin="{TemplateBinding Padding}"
+                                              HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#F1F3F4"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#E8EAED"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Bd" Property="Opacity" Value="0.5"/>
+                                <Setter Property="Cursor" Value="Arrow"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </UserControl.Resources>
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Margin="0,8,2,0">
+
+            <!-- ===== 本节点 ===== -->
+            <Border Style="{StaticResource RegCard}">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource RegTitle}" Text="本节点（我是谁、别人怎么测我）"/>
+
+                    <WrapPanel>
+                        <CheckBox x:Name="EnabledCheck" Style="{StaticResource RegCheck}"
+                                  Content="参与注册同步（多机房自动互测）"
+                                  ToolTip="不勾选时与升级前行为完全一致：不发注册消息，也不接受注册消息"/>
+                        <CheckBox x:Name="DistributableCheck" Style="{StaticResource RegCheck}"
+                                  Content="参与网状（允许本节点被分发给其他节点）"
+                                  ToolTip="关闭后：其他节点上不会出现本机链路，本机仍可正常测试别人"/>
+                    </WrapPanel>
+
+                    <Grid Margin="0,4,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource RegLabel}" Text="节点名称"/>
+                        <TextBox   Grid.Row="0" Grid.Column="1" x:Name="NodeNameBox" Style="{StaticResource RegBox}"
+                                   MaxWidth="240" HorizontalAlignment="Left"
+                                   ToolTip="其他节点上自动生成的链路名就是它"/>
+                        <TextBlock Grid.Row="0" Grid.Column="2" Style="{StaticResource RegLabel}" Text="本端外网地址"/>
+                        <TextBox   Grid.Row="0" Grid.Column="3" x:Name="PublicHostBox" Style="{StaticResource RegBox}"
+                                   MaxWidth="240" HorizontalAlignment="Left" Margin="0,0,0,8"
+                                   ToolTip="其他节点要靠这个地址找到本机；必须手工填写"/>
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource RegLabel}" Text="本端外网端口"/>
+                        <TextBox   Grid.Row="1" Grid.Column="1" x:Name="PublicPortBox" Style="{StaticResource RegBox}"
+                                   Width="90" HorizontalAlignment="Left"
+                                   ToolTip="机房出口映射到本机的那个端口（通常等于监听端口）"/>
+                        <TextBlock Grid.Row="1" Grid.Column="2" Style="{StaticResource RegLabel}" Text="节点身份"/>
+                        <TextBlock Grid.Row="1" Grid.Column="3" x:Name="NodeIdText" TextWrapping="NoWrap"
+                                   VerticalAlignment="Center" Foreground="#5F6368" FontFamily="Consolas, monospace"
+                                   ToolTip="节点唯一标识；两台机器共用同一份配置会被中心标记为疑似重复"/>
+                    </Grid>
+
+                    <TextBlock Style="{StaticResource RegHint}"
+                               Text="外网地址必须手工填写：出方向 NAT 的源端口与入方向映射端口通常不同，程序无法从“中心看到的源地址”自动推断（那只是出方向的地址）。"/>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <TextBlock Style="{StaticResource RegLabel}" Text="可被探测的协议"/>
+                        <CheckBox x:Name="AdvertiseTcpCheck" Style="{StaticResource RegCheck}"
+                                  Content="TCP" ToolTip="本端允许被 TCP 探测"/>
+                        <CheckBox x:Name="AdvertiseUdpCheck" Style="{StaticResource RegCheck}"
+                                  Content="UDP" ToolTip="本端允许被 UDP 探测"/>
+                    </StackPanel>
+                    <TextBlock Style="{StaticResource RegHint}"
+                               Text="与「参数设置」里的全局协议勾选含义不同：这里是“允许别人怎么测我”。机房只映射了 UDP 就关掉 TCP，否则对端会把必然失败的探测判成线路故障。"/>
+                </StackPanel>
+            </Border>
+
+            <!-- ===== 注册中心 ===== -->
+            <Border Style="{StaticResource RegCard}">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource RegTitle}" Text="注册中心（去哪儿注册）"/>
+
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource RegLabel}" Text="中心地址"/>
+                        <TextBox   Grid.Row="0" Grid.Column="1" x:Name="CenterHostBox" Style="{StaticResource RegBox}"
+                                   MaxWidth="240" HorizontalAlignment="Left"
+                                   ToolTip="中心与本机同机时可填 127.0.0.1"/>
+                        <TextBlock Grid.Row="0" Grid.Column="2" Style="{StaticResource RegLabel}" Text="中心端口"/>
+                        <TextBox   Grid.Row="0" Grid.Column="3" x:Name="CenterPortBox" Style="{StaticResource RegBox}"
+                                   Width="90" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+
+                        <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource RegLabel}" Text="预共享密钥"/>
+                        <Grid Grid.Row="1" Grid.Column="1">
+                            <PasswordBox x:Name="SecretBox" Height="26" Padding="6,0" VerticalContentAlignment="Center"
+                                         BorderBrush="#DADCE0" Width="200" HorizontalAlignment="Left"
+                                         ToolTip="两端必须一致；为空时仍可注册，但清单会标记为“无密钥”"/>
+                            <TextBox x:Name="SecretTextBox" Height="26" Padding="6,0" VerticalContentAlignment="Center"
+                                     BorderBrush="#DADCE0" Width="200" HorizontalAlignment="Left"
+                                     Visibility="Collapsed"/>
+                        </Grid>
+                        <CheckBox Grid.Row="1" Grid.Column="2" x:Name="ShowSecretCheck" Style="{StaticResource RegCheck}"
+                                  Content="显示" ToolTip="便于核对两端密钥是否一致"/>
+                        <TextBlock Grid.Row="1" Grid.Column="3" Style="{StaticResource RegHint}" Margin="0"
+                                   Text="密钥两端必须一致"/>
+                    </Grid>
+
+                    <Grid Margin="0,8,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <TextBlock Grid.Column="0" Style="{StaticResource RegLabel}" Text="心跳周期"/>
+                        <TextBox   Grid.Column="1" x:Name="HeartbeatBox" Style="{StaticResource RegBox}" Width="66"
+                                   ToolTip="秒；保活，也是中心判活的依据"/>
+                        <TextBlock Grid.Column="2" Style="{StaticResource RegLabel}" Text="同步周期"/>
+                        <TextBox   Grid.Column="3" x:Name="SyncBox" Style="{StaticResource RegBox}" Width="66"
+                                   ToolTip="秒；检测中心是否有新链路的周期（默认 300 秒）"/>
+                        <TextBlock Grid.Column="4" Style="{StaticResource RegLabel}" Text="重传间隔"/>
+                        <TextBox   Grid.Column="5" x:Name="RetryBox" Style="{StaticResource RegBox}" Width="66"
+                                   ToolTip="毫秒；单次请求失败后的重传间隔，退避 1×/2×/4×…"/>
+                        <TextBlock Grid.Column="6" Style="{StaticResource RegLabel}" Text="最大重传"/>
+                        <TextBox   Grid.Column="7" x:Name="MaxRetriesBox" Style="{StaticResource RegBox}" Width="56"
+                                   HorizontalAlignment="Left" Margin="0,0,0,8"
+                                   ToolTip="次数"/>
+                    </Grid>
+
+                    <CheckBox x:Name="ServeAsCenterCheck" Style="{StaticResource RegCheck}"
+                              Content="本机同时承担注册中心角色（其他节点的注册中心地址填本机）"
+                              ToolTip="中心与本测试端共用同一个监听端口，通过协议前缀区分注册消息与探测包"/>
+                    <TextBlock Style="{StaticResource RegHint}"
+                               Text="中心地址填 127.0.0.1（本机回环）时，本节点只会注册到本机中心，且回环地址不会被分发给其他节点——适合中心兼测试端、但不希望别人测它的情况。"/>
+                </StackPanel>
+            </Border>
+
+            <!-- ===== 状态 / 操作 ===== -->
+            <Border Style="{StaticResource RegCard}">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource RegTitle}" Text="状态"/>
+
+                    <TextBlock x:Name="ConnectionText" TextWrapping="Wrap" Foreground="#202124"/>
+                    <TextBlock x:Name="SelfCheckText" Style="{StaticResource RegHint}"/>
+                    <TextBlock x:Name="SelfDistributionText" Style="{StaticResource RegHint}"/>
+                    <TextBlock x:Name="LastErrorText" Style="{StaticResource RegHint}" Foreground="#C5221F"
+                               Visibility="Collapsed"/>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                        <Button x:Name="RegisterNowButton" Style="{StaticResource RegButton}" Content="立即注册"
+                                Click="RegisterNow_Click" ToolTip="立刻发一次 REG（不需要等心跳周期）"/>
+                        <Button x:Name="SyncNowButton" Style="{StaticResource RegButton}" Content="立即同步"
+                                Click="SyncNow_Click" ToolTip="立刻拉取一次中心清单"/>
+                        <Button x:Name="SaveRegistryButton" Style="{StaticResource RegButton}" Content="保存配置"
+                                Click="SaveRegistry_Click" ToolTip="校验并保存到 appsettings.json（与窗口底部的“保存配置”等价）"/>
+                        <TextBlock Style="{StaticResource RegHint}" Margin="6,0,0,0" VerticalAlignment="Center"
+                                   Text="注册同步随“启动测试”一起运行；运行时改这里的参数需重新“启动测试”"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- ===== 注册中心管理（仅在承担中心角色时显示） ===== -->
+            <Border x:Name="CenterSection" Style="{StaticResource RegCard}" Visibility="Collapsed">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource RegTitle}" Text="注册中心管理（本机是中心）"/>
+
+                    <TextBlock Style="{StaticResource RegHint}" Margin="0,0,0,8"
+                               Text="「分发」取消勾选 = 该节点立刻从所有子节点的链路里消失，且不会被它的心跳顶回来（不改对端配置）。「移除」是权威删除，需在中心侧恢复后该节点才能重新注册。"/>
+
+                    <DataGrid x:Name="NodeGrid" AutoGenerateColumns="False" IsReadOnly="True"
+                              HeadersVisibility="Column" CanUserAddRows="False" CanUserDeleteRows="False"
+                              CanUserResizeRows="False" CanUserSortColumns="False"
+                              SelectionUnit="FullRow" SelectionMode="Extended"
+                              RowHeight="26" Height="200" Background="White"
+                              BorderBrush="#E1E4E8" BorderThickness="1"
+                              GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#EEF0F2">
+                        <DataGrid.Columns>
+                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="170"/>
+                            <DataGridTextColumn Header="地址" Binding="{Binding Address}" Width="190"/>
+                            <DataGridTextColumn Header="协议" Binding="{Binding Protocols}" Width="110"/>
+                            <DataGridTextColumn Header="最后心跳" Binding="{Binding LastSeen}" Width="170"/>
+                            <DataGridTextColumn Header="状态" Binding="{Binding State}" Width="*" MinWidth="200"/>
+                            <DataGridTemplateColumn Header="分发" Width="60">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <CheckBox IsChecked="{Binding Distributed, UpdateSourceTrigger=PropertyChanged}"
+                                                  HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                  ToolTip="取消勾选：该节点不再出现在任何子节点的链路里"/>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <Button x:Name="RemoveNodeButton" Style="{StaticResource RegButton}" Content="移除所选"
+                                Click="RemoveNode_Click"
+                                ToolTip="权威删除：该节点将不再出现在所有子节点的链路里"/>
+                        <Button x:Name="RestoreNodeButton" Style="{StaticResource RegButton}" Content="恢复所选移除"
+                                Click="RestoreNode_Click" IsEnabled="False"
+                                ToolTip="把已移除的节点从移除名单里去掉，它会在下一次心跳重新出现"/>
+                    </StackPanel>
+
+                    <TextBlock x:Name="RemovedNodesText" Style="{StaticResource RegHint}"/>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

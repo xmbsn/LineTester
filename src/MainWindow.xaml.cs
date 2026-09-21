@@ -10,6 +10,8 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
+using LineTester.Registry;
+using LineTester.Views;
 
 namespace LineTester;
 
@@ -65,6 +67,18 @@ public partial class MainWindow : Window
     private Task? _loop;
 
     /// <summary>
+    /// 探测循环每轮读取的链路快照。注册中心同步到新链路时**无需重启测试**即可开始探测
+    /// （网状测试的自动发现就靠这一点；手工改动仍按老规矩"点启动测试后生效"）。
+    /// </summary>
+    private volatile LinkConfig[] _liveLinks = Array.Empty<LinkConfig>();
+
+    // ---- 注册中心（切片 3）----
+
+    private RegistryClient? _registryClient;
+    private RegistryStore? _registryStore;
+    private RegistryCenterService? _registryCenter;
+
+    /// <summary>
     /// 探测循环每轮开始时读取的“当前会话号”。
     /// 必须每轮重新读取：若固定为启动时的值，点击“清除”后所有结果都会被当成陈旧数据丢弃，
     /// 统计将永远无法重新开始。
@@ -85,6 +99,11 @@ public partial class MainWindow : Window
         TcpCheck.Unchecked += Protocol_Changed;
         UdpCheck.Checked += Protocol_Changed;
         UdpCheck.Unchecked += Protocol_Changed;
+
+        // 注册中心页：校验与落盘仍走主窗口这一条路径，页内只负责显示与即时操作
+        RegistryTabPanel.SaveRequested += () => SaveConfig_Click(this, new RoutedEventArgs());
+        RegistryTabPanel.RegisterRequested += OnRegistryRegisterRequested;
+        RegistryTabPanel.CenterChanged += OnRegistryCenterChanged;
 
         _uiTimer.Tick += OnUiTick;
         _uiTimer.Start();
@@ -134,7 +153,10 @@ public partial class MainWindow : Window
         TcpCheck.IsChecked = cfg.EnableTcp;
         UdpCheck.IsChecked = cfg.EnableUdp;
 
+        RegistryTabPanel.Load(cfg.Registrar);
+
         LoadLinkRows(cfg.Links);
+        RefreshRegistryUi();
     }
 
     // ---------------- 链路编辑器 ----------------
@@ -163,7 +185,28 @@ public partial class MainWindow : Window
     private void OnLinkRowChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (_revalidating) return;
-        if (e.PropertyName is nameof(LinkRow.Problem) or nameof(LinkRow.IsValid)) return;
+        if (e.PropertyName is nameof(LinkRow.Problem) or nameof(LinkRow.IsValid) or nameof(LinkRow.Diagnosis)
+            or nameof(LinkRow.IsRegistry) or nameof(LinkRow.SourceText) or nameof(LinkRow.LocalDisabled)) return;
+
+        // 注册链路：TCP 与 UDP 都取消勾选 = 本地停测意图（规格 §8.5）。
+        // 它必须写回配置：否则下一次同步会把"取消勾选"当成需要纠正的偏差，又给你勾回来。
+        if (sender is LinkRow { IsRegistry: true } registryRow &&
+            e.PropertyName is nameof(LinkRow.Tcp) or nameof(LinkRow.Udp))
+        {
+            var disabled = !registryRow.Tcp && !registryRow.Udp;
+
+            if (registryRow.LocalDisabled != disabled)
+            {
+                registryRow.LocalDisabled = disabled;
+                UpdateStatus(disabled
+                    ? $"「{registryRow.Name}」已本地停测：注册同步不会覆盖这个意图，重新勾选任一协议即恢复"
+                    : $"「{registryRow.Name}」已恢复本地探测（协议以注册中心下发的为准）");
+            }
+
+            // 恢复探测时立刻同步一次，否则要等一个同步周期才拿回对端宣告的协议
+            if (!disabled && _registryClient is not null) _ = _registryClient.RegisterNowAsync();
+        }
+
         RevalidateLinks();
     }
 
@@ -213,8 +256,11 @@ public partial class MainWindow : Window
         => $"{row.Name.Trim()}|{row.Host.Trim()}|{row.Port}|{protocol}";
 
     private string LinksSignature()
-        => string.Join(";", _linkRows.Select(
-            r => $"{r.Name.Trim()}|{r.Host.Trim()}|{r.PortText?.Trim()}|{r.Tcp}|{r.Udp}"));
+        => LinksSignatureOf(_linkRows.Select(r => r.ToConfig()));
+
+    /// <summary>同一套签名口径，但直接作用于配置（注册同步自动落盘后用它比对"是否已保存"）。</summary>
+    private static string LinksSignatureOf(IEnumerable<LinkConfig> links)
+        => string.Join(";", links.Select(l => $"{l.Name.Trim()}|{l.Host.Trim()}|{l.Port}|{l.Tcp}|{l.Udp}"));
 
     private string LinkProblems()
         => string.Join("\n", _linkRows
@@ -277,6 +323,20 @@ public partial class MainWindow : Window
         _alert("链路配置校验未通过，无法" + action +
                "。请修正「链路配置」页中标红的行：\n\n" + LinkProblems(), "链路配置错误");
         return false;
+    }
+
+    /// <summary>
+    /// 注册链路的名称/主机/端口禁止本地编辑：它们由中心下发，本地改了也会在下一个同步周期被覆盖，
+    /// 只会让人误以为"改了没生效"。要本地停测，请把 TCP 与 UDP 都取消勾选。
+    /// </summary>
+    private void LinksGrid_BeginningEdit(object sender, DataGridBeginningEditEventArgs e)
+    {
+        if (e.Row.Item is not LinkRow { IsRegistry: true } row) return;
+        if (e.Column.Header is "TCP" or "UDP") return;
+
+        e.Cancel = true;
+        UpdateStatus($"「{row.Name}」来自注册中心：名称/主机/端口不能本地修改；" +
+                     "要本地停测，请把该行的 TCP 与 UDP 都取消勾选（同步不会覆盖这个意图）");
     }
 
     private void SelectAndFocus(LinkRow row)
@@ -357,8 +417,21 @@ public partial class MainWindow : Window
             return;
         }
 
-        var what = selected.Count == 1 ? $"「{selected[0].Display}」" : $"选中的 {selected.Count} 条链路";
-        var message = $"确定要删除{what}吗？\n\n已统计到的数据和 logs 目录下的历史日志不会被删除。";
+        // 注册链路不能在这里删：本地删掉只会在下一个同步周期被中心加回来（假成功）
+        var registryRows = selected.Where(r => r.IsRegistry).ToList();
+        if (registryRows.Count > 0)
+        {
+            var what = registryRows.Count == 1 ? $"「{registryRows[0].Name}」" : $"{registryRows.Count} 条链路";
+            _alert(
+                what + "来自注册中心，不能在这里删除：\n\n" +
+                "· 要让它在所有节点上消失：请在注册中心侧移除该节点（「注册中心」页 → 注册中心管理 → 移除所选）。\n" +
+                "· 只想在本机停测：把该行的 TCP 与 UDP 都取消勾选（同步不会覆盖这个意图）。",
+                "删除链路");
+            return;
+        }
+
+        var what2 = selected.Count == 1 ? $"「{selected[0].Display}」" : $"选中的 {selected.Count} 条链路";
+        var message = $"确定要删除{what2}吗？\n\n已统计到的数据和 logs 目录下的历史日志不会被删除。";
 
         if (_linkRows.Count - selected.Count == 0)
             message += "\n\n注意：这是最后一条链路。删除后程序只会监听端口并应答对方的探测，不再主动发包。";
@@ -422,6 +495,15 @@ public partial class MainWindow : Window
         _settings.ConsecutiveLossWarn = lossCount;
         _settings.EnableTcp = TcpCheck.IsChecked == true;
         _settings.EnableUdp = UdpCheck.IsChecked == true;
+
+        // 注册配置（未启用注册时不做校验，与 ValidateRegistrar 口径一致）
+        if (!RegistryTabPanel.TryReadInto(_settings.Registrar, out var registrarError))
+        {
+            MainTabs.SelectedItem = RegistryTab;
+            MessageBox.Show("注册中心配置无效，请修正「注册中心」页：\n\n" + registrarError,
+                "配置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return false;
+        }
 
         // 链路以编辑器里的行为准，校验不通过就拒绝保存/启动
         if (!EnsureLinksValid("保存或启动"))
@@ -532,26 +614,50 @@ public partial class MainWindow : Window
 
         try
         {
+            var notes = new List<string>();
+
             var server = new ProbeServer(_settings.ListenPort);
             server.Start();
             _server = server;
+
+            // 注册协议与探测共用同一个监听端口：按 LT1| 前缀分流。
+            // 中心 → 处理注册消息；非中心 → 明确回 ERR unsupported（比静默回显更容易现场定位）。
+            if (_settings.Registrar.ServeAsCenter)
+            {
+                var store = EnsureRegistryStore();
+                _registryCenter = new RegistryCenterService(
+                    store, _settings.Registrar.Secret, _settings.Registrar.HeartbeatSeconds);
+                server.ProtocolHandler = _registryCenter.HandleAsync;
+                notes.Add($"本机同时是注册中心：清单 {store.Nodes.Count} 个节点");
+            }
+            else
+            {
+                _registryCenter = null;
+                var secret = _settings.Registrar.Secret;
+                var unsupported = RegistryCenterService.RespondUnsupportedAsync;
+                server.ProtocolHandler = (request, length, _, _) =>
+                    unsupported(secret, request, length, CancellationToken.None);
+            }
 
             _session.Configure(_settings);
             ClearSession();
 
             // 记录本次真正生效的链路，便于提示"运行中的测试仍在使用旧链路"
+            _liveLinks = _settings.Links.ToArray();
             _appliedLinksSignature = LinksSignature();
             UpdateLinkSummary();
+
+            StartRegistryClient(notes);
 
             var cts = new CancellationTokenSource();
             _cts = cts;
             _loop = Task.Run(() => TestLoop(cts.Token));
 
-            var notes = new List<string>();
             if (!server.DualStack) notes.Add("本机不支持 IPv6，监听为仅 IPv4");
             if (ActiveProbeCount() == 0) notes.Add("当前没有生效的探测（未勾选协议，或链路未启用该协议），只会监听应答");
 
             UpdateStatus(notes.Count == 0 ? null : string.Join("；", notes));
+            RefreshRegistryUi();
         }
         catch (Exception ex)
         {
@@ -602,8 +708,16 @@ public partial class MainWindow : Window
 
         cts?.Cancel();
 
+        StopRegistryClient();
+
         _server?.Dispose();
         _server = null;
+
+        // 中心服务与清单实例随本次运行结束（清单已落盘，界面下一次刷新会重新读文件）。
+        // 留着旧实例会让"停止后再改参数启动"出现两个写入同一文件的实例。
+        _registryCenter = null;
+        _registryStore = null;
+        _liveLinks = Array.Empty<LinkConfig>();
 
         if (cts is not null)
         {
@@ -619,11 +733,231 @@ public partial class MainWindow : Window
         }
     }
 
+    // ---------------- 注册中心（切片 3） ----------------
+
+    /// <summary>中心清单文件：与配置文件同目录（自检里 ConfigManager.OverridePath 指到临时目录时也一起走）。</summary>
+    private static string RegistryStatePath
+        => Path.Combine(Path.GetDirectoryName(ConfigManager.ConfigPath) ?? AppContext.BaseDirectory, "registry.json");
+
+    /// <summary>注册协议自身的日志目录（按天分目录，与探测日志同级但文件名不同）。</summary>
+    private static string RegistryLogDirectory => Path.Combine(AppContext.BaseDirectory, "logs");
+
+    private RegistryStore EnsureRegistryStore()
+    {
+        _registryStore ??= new RegistryStore(RegistryStatePath, _settings.Registrar.HeartbeatSeconds);
+        return _registryStore;
+    }
+
+    private void StartRegistryClient(List<string> notes)
+    {
+        if (!_settings.Registrar.Enabled)
+        {
+            notes.Add("未启用注册同步（只监听应答与探测）");
+            return;
+        }
+
+        var options = new RegistryClientOptions
+        {
+            NodeId = _settings.Registrar.NodeId,
+            NodeName = _settings.Registrar.NodeName,
+            PublicHost = _settings.Registrar.PublicHost,
+            PublicPort = _settings.Registrar.PublicPort,
+            Tcp = _settings.Registrar.AdvertiseTcp,
+            Udp = _settings.Registrar.AdvertiseUdp,
+            Distributable = _settings.Registrar.Distributable,
+            CenterHost = _settings.Registrar.CenterHost,
+            CenterPort = _settings.Registrar.CenterPort,
+            Secret = _settings.Registrar.Secret,
+            HeartbeatSeconds = _settings.Registrar.HeartbeatSeconds,
+            SyncSeconds = _settings.Registrar.SyncSeconds,
+            RetryMs = _settings.Registrar.RetryMs,
+            MaxRetries = _settings.Registrar.MaxRetries,
+            LogDirectory = RegistryLogDirectory
+        };
+
+        var client = new RegistryClient(options);
+        client.SnapshotReceived += OnRegistrySnapshot;
+
+        if (!client.Start())
+        {
+            notes.Add("注册同步未启动：" + (client.Status.LastError ?? "未知原因"));
+            client.SnapshotReceived -= OnRegistrySnapshot;
+            client.Dispose();
+            return;
+        }
+
+        _registryClient = client;
+    }
+
+    private void StopRegistryClient()
+    {
+        var client = _registryClient;
+        _registryClient = null;
+        if (client is null) return;
+
+        client.SnapshotReceived -= OnRegistrySnapshot;
+        try { client.Dispose(); } catch { }
+    }
+
+    /// <summary>客户端回调来自后台同步线程，一律切回 UI 线程再动界面与配置。</summary>
+    private void OnRegistrySnapshot(IReadOnlyList<NodeSnapshot> nodes)
+    {
+        try
+        {
+            Dispatcher.InvokeAsync(() => ApplyRegistrySnapshot(nodes));
+        }
+        catch (Exception)
+        {
+            // 窗口已关闭 / Dispatcher 已停：忽略即可，配置仍会由中心在下次同步时重发
+        }
+    }
+
+    /// <summary>
+    /// 应用中心快照：注册链路增/改/删，手工链路原样保留（规格 §8.4）。
+    /// 新链路**无需重启测试**即可开始探测（`_liveLinks` 立即替换）。
+    /// </summary>
+    private void ApplyRegistrySnapshot(IReadOnlyList<NodeSnapshot> nodes)
+    {
+        MergeLocalIntent();
+
+        var outcome = RegistrySync.Apply(nodes, _settings.Registrar.NodeId, _settings.Links);
+        if (!outcome.HasChanges)
+        {
+            RefreshRegistryUi();
+            return;
+        }
+
+        _settings.Links = outcome.Links;
+        _liveLinks = _settings.Links.ToArray();
+
+        SyncRegistryRows(outcome.Links);
+        _appliedLinksSignature = LinksSignatureOf(_settings.Links);
+
+        var persisted = TryPersistConfigQuietly(out var saveError);
+
+        UpdateStatus(
+            $"注册中心清单已更新：新增 {outcome.Added}、更新 {outcome.Updated}、删除 {outcome.Removed}" +
+            (outcome.SkippedUnusable > 0 ? $"、跳过 {outcome.SkippedUnusable} 个不可用地址" : "") +
+            (persisted ? "（已保存配置，新链路立刻开始探测）" : $"；但配置未能保存：{saveError}"));
+
+        RevalidateLinks();
+        RefreshRegistryUi();
+    }
+
+    /// <summary>
+    /// 把编辑器里"未保存"的本地停测意图并入配置，再交给 <see cref="RegistrySync"/>。
+    /// 不做这一步：本地刚取消勾选的链路会被这次同步按中心值改回勾选状态（用户的意图被吃掉）。
+    /// </summary>
+    private void MergeLocalIntent()
+    {
+        var rows = _linkRows
+            .Where(r => r.IsRegistry && !string.IsNullOrEmpty(r.NodeId))
+            .ToDictionary(r => r.NodeId, StringComparer.Ordinal);
+
+        foreach (var link in _settings.Links.Where(l => l.Source == LinkSources.Registry))
+        {
+            if (rows.TryGetValue(link.NodeId, out var row)) link.LocalDisabled = row.LocalDisabled;
+        }
+    }
+
+    /// <summary>只同步注册来源的行：手工行保持原样，不打断用户正在编辑的内容。</summary>
+    private void SyncRegistryRows(List<LinkConfig> links)
+    {
+        var registryLinks = links.Where(l => l.Source == LinkSources.Registry).ToList();
+        var live = registryLinks.Select(l => l.NodeId).ToHashSet(StringComparer.Ordinal);
+
+        foreach (var row in _linkRows.Where(r => r.IsRegistry && !live.Contains(r.NodeId)).ToList())
+        {
+            row.PropertyChanged -= OnLinkRowChanged;
+            _linkRows.Remove(row);
+        }
+
+        foreach (var link in registryLinks)
+        {
+            var row = _linkRows.FirstOrDefault(r => r.IsRegistry && r.NodeId == link.NodeId);
+            if (row is null) AddLinkRow(LinkRow.FromConfig(link));
+            else row.ApplyFrom(link);
+        }
+
+        // 撤销缓冲里可能留着已被中心删除的注册行：留着会让"撤销删除"把它复活
+        _lastDeleted.RemoveAll(x => x.Row.IsRegistry && !live.Contains(x.Row.NodeId));
+        UpdateUndoButton();
+
+        ApplyGlobalProtocolsToRows();
+    }
+
+    /// <summary>
+    /// 注册同步触发的自动落盘：不弹模态框。
+    /// 配置文件读取失败、或被其它程序改过时放弃自动写（避免覆盖别人的修改），交给用户手动保存。
+    /// </summary>
+    private bool TryPersistConfigQuietly(out string error)
+    {
+        error = "";
+
+        if (_configLoadError is not null)
+        {
+            error = "配置文件读取失败，未自动保存";
+            return false;
+        }
+
+        var current = ConfigManager.Stamp();
+        if (current is not null && _configStamp is not null && current.Value != _configStamp.Value)
+        {
+            error = "配置文件已被其它程序修改，未自动覆盖";
+            return false;
+        }
+
+        try
+        {
+            ConfigManager.Save(_settings);
+            _configStamp = ConfigManager.Stamp();
+            _savedLinksSignature = LinksSignatureOf(_settings.Links);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            return false;
+        }
+    }
+
+    private void RefreshRegistryUi()
+    {
+        var now = DateTime.UtcNow;
+        RegistryTabPanel.ShowStatus(_registryClient?.Status, _settings.Registrar, now);
+
+        var store = _settings.Registrar.ServeAsCenter ? EnsureRegistryStore() : null;
+        RegistryTabPanel.ShowCenter(store, now);
+    }
+
+    private void OnRegistryRegisterRequested() => _ = RegisterNowAndRefreshAsync();
+
+    private async Task RegisterNowAndRefreshAsync()
+    {
+        var client = _registryClient;
+        if (client is null)
+        {
+            MessageBox.Show(
+                "注册同步未运行：请先点“启动测试”，并确认已在「注册中心」页勾选“参与注册同步”、填好中心地址。",
+                "立即注册", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        await client.RegisterNowAsync();
+        RefreshRegistryUi();
+        UpdateStatus($"已向注册中心发起一次注册/同步（{DateTime.Now:HH:mm:ss}）");
+    }
+
+    private void OnRegistryCenterChanged()
+    {
+        RefreshRegistryUi();
+        UpdateStatus("注册中心清单已改动：其他节点会在各自的同步周期内更新链路（默认 300 秒）");
+    }
+
     // ---------------- 探测循环 ----------------
 
     private async Task TestLoop(CancellationToken ct)
     {
-        var links = _settings.Links.ToArray();
         var interval = _settings.IntervalMs;
         var timeout = _settings.TimeoutMs;
 
@@ -631,6 +965,9 @@ public partial class MainWindow : Window
         {
             var roundStart = Stopwatch.StartNew();
             var epoch = Volatile.Read(ref _loopEpoch);
+
+            // 每轮重新读取链路快照：注册中心同步到新链路后立刻开始探测，不必重启测试
+            var links = _liveLinks;
 
             // 每轮重新读取协议勾选，取消勾选后本轮即停止发送该协议的探测包
             var sendTcp = _liveTcp;
@@ -705,6 +1042,7 @@ public partial class MainWindow : Window
     {
         DrainPendingResults();
         RefreshStats();
+        RefreshRegistryUi();
         RefreshStatusBar();
     }
 
@@ -835,11 +1173,18 @@ public partial class MainWindow : Window
         if (_configLoadError is not null)
             note = "⚠ 配置文件读取失败，未自动保存" + (note is null ? "" : " | " + note);
 
+        // 注册状态一行（未启用注册时 DescribeConnection 返回 null，状态栏与升级前完全一致）
+        var registry = RegistryUiText.DescribeConnection(_registryClient?.Status, _settings.Registrar, DateTime.UtcNow);
+        if (registry is not null)
+            note = string.IsNullOrEmpty(note) ? registry.Text : note + " | " + registry.Text;
+
         StatusNote.Text = note ?? "";
         StatusNote.Visibility = string.IsNullOrEmpty(note) ? Visibility.Collapsed : Visibility.Visible;
         StatusNote.Foreground = new SolidColorBrush(_statusIsError
             ? Color.FromRgb(0xC5, 0x22, 0x1F)
-            : Color.FromRgb(0x5F, 0x63, 0x68));
+            : registry?.Warning == true
+                ? Color.FromRgb(0xB2, 0x6A, 0x00)
+                : Color.FromRgb(0x5F, 0x63, 0x68));
 
         UpdateLinkSummary();
     }

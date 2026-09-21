@@ -51,6 +51,12 @@ internal static partial class Program
         TestRegistrySync();
         TestRegistryCenter();
         await TestRegistryEndToEndAsync();
+        await TestRegistryNonCenterAsync();
+        TestRegistrarDraft();
+        TestRegistryUiText();
+        TestRegistryNodeRow();
+        TestRegistryPanelUi();
+        TestRegistryMainWindowUi();
         await TestProbesAsync();
         TestMainWindowClear();
 
@@ -1323,6 +1329,20 @@ internal static partial class Program
                     Check("非法行被标红", brush?.Color == Color.FromRgb(0xFD, 0xEC, 0xEA),
                         container.Background?.ToString() ?? "null");
                     Eq("非法行在“校验”列给出原因", "端口必须是整数", badRow.Problem);
+                }
+
+                // 注册页的真实排版：报表里的检查会跳过 TabControl 内部，这里单独看一次
+                // （只查横向裁剪，纵向超出由 ScrollViewer 承担，是设计允许的）
+                if (window.FindName("RegistryTab") is TabItem registryTab &&
+                    window.FindName("RegistryTabPanel") is FrameworkElement registryPanel)
+                {
+                    tabs.SelectedItem = registryTab;
+                    Pump(400);
+
+                    var panelProblems = new List<string>();
+                    AuditNestedWidth(registryPanel, panelProblems);
+                    Check("注册页在真实窗口里无横向裁剪", panelProblems.Count == 0,
+                        string.Join("；", panelProblems));
                 }
 
                 Report(content, width, height);

@@ -57,6 +57,31 @@ public sealed class RegistryCenterService
         byte[] request, int length, IPEndPoint? remote, CancellationToken cancellationToken)
         => Task.FromResult(Handle(request, length, remote));
 
+    /// <summary>
+    /// **非中心节点**的统一应答（规格 §12 兼容矩阵）：明确回 <c>ERR unsupported</c>。
+    ///
+    /// 为什么不直接静默回显：回显虽然也会被客户端判成"不是注册中心"，但 ERR 把原因写在报文里，
+    /// 现场"把中心地址填成了普通节点"一眼可见。用本节点自己的密钥签名
+    /// （客户端对 ERR 不强制验签，因此密钥不一致也能看到原因），且被客户端视为**终态不重传**。
+    /// 非 <c>LT1|</c> 的帧一律不接管（返回空），探测回显路径完全不变。
+    /// </summary>
+    public static Task<IReadOnlyList<byte[]>> RespondUnsupportedAsync(
+        string secret, byte[] request, int length, CancellationToken cancellationToken)
+    {
+        if (!RegistryProtocol.TryDecode(request, length, out var type, out _, out var rawPayload))
+            return Task.FromResult<IReadOnlyList<byte[]>>(Array.Empty<byte[]>());
+
+        var frame = RegistryProtocol.EncodeSigned(secret, RegistryProtocol.TypeError,
+            RegistryProtocol.Serialize(new ErrorMessage
+            {
+                ReqId = RegistryProtocol.ExtractRequestId(rawPayload),
+                Code = RegistryErrorCodes.Unsupported,
+                Message = $"本端不是注册中心（不支持 {type}），请检查注册中心地址与端口是否填错"
+            }));
+
+        return Task.FromResult<IReadOnlyList<byte[]>>(new[] { frame });
+    }
+
     private IReadOnlyList<byte[]> Handle(byte[] request, int length, IPEndPoint? remote)
     {
         if (!RegistryProtocol.TryDecode(request, length, out var type, out var mac, out var rawPayload))
@@ -182,6 +207,10 @@ public sealed class RegistryCenterService
     /// </summary>
     private IReadOnlyList<byte[]> BuildAck(string requestId, ulong clientRevision, IPEndPoint? remote)
     {
+        // 判活必须有人做：超 TTL 的节点在这里被标成离线（只标记、不删除）。
+        // 每个心跳都会走到这里，因此不会出现"中心进程活着但节点永远显示在线"。
+        _store.RefreshOnlineState();
+
         var revision = _store.Revision;
         var changed = clientRevision != revision;
 

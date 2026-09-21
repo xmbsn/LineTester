@@ -102,6 +102,17 @@ public static class RegistryProtocol
 
     public static string Serialize<T>(T message) => JsonSerializer.Serialize(message, Json);
 
+    /// <summary>
+    /// 只取请求 ID。ERR 应答要带上它，发起方才能对上号（取不到就回空串，客户端也接受）。
+    /// </summary>
+    public static string ExtractRequestId(string rawPayload)
+        => Deserialize<RequestIdOnly>(rawPayload)?.ReqId ?? "";
+
+    private sealed class RequestIdOnly
+    {
+        public string ReqId { get; set; } = "";
+    }
+
     public static T? Deserialize<T>(string rawPayload) where T : class
     {
         try

@@ -9,6 +9,9 @@ publish/
 logs/
 .testtmp/
 
+# 注册中心清单（运行期数据，随配置文件同目录生成）
+registry.json
+
 # 界面渲染快照（排版检查用）
 .ui-preview/
 
