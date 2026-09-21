@@ -7,7 +7,7 @@
 > 链路编辑器（含防误删）、界面重排、报文带对端源地址、失败原因分类、日志按天滚动 → 上传 GitHub（private）；
 > ② **链路注册协议 v1（多机房自动互测）** 全流程落地：规格 → 计划 → 三个切片（端口分流与中心服务、
 > 客户端同步循环与三节点端到端、注册设置页与中心节点管理 + 链路页联动），规格 §12 兼容矩阵逐行验证。
-> 自检从 **0 → 853 项断言**，全程 `0 警告 0 错误`。
+> 自检从 **0 → 946 项断言**，全程 `0 警告 0 错误`。
 
 ---
 
@@ -15,7 +15,7 @@
 
 > 读取 `E:\dsh\LineTester\LineTester.md`（本文件）与 `README.md`，然后：
 > ① `dotnet build .\LineTester.sln -c Release` 确认可编译（应为 0 警告 0 错误）；
-> ② `dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release` 跑自检（应 853/853 通过）；
+> ② `dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release` 跑自检（应 946/946 通过）；
 > ③ 改任何代码前先看本文件 **§4 关键设计约定** 与 **§5 本机环境坑**（这两节能避免重复踩坑）；
 > ④ 改注册协议/注册页前**先读 `docs/REGISTRY-PROTOCOL.md`**（协议契约的 SSOT，实现期修正已回写）。
 > 注意：**测试工程不在 .sln 里**（本机 SDK 损坏，见 §5.2），必须按路径构建/运行。
@@ -25,7 +25,7 @@
 - .NET 8 WPF 桌面工具：**主动探测 + 被动应答一体**，两端互相探测对方的监听端口；输出实时统计与按天滚动的 CSV 日志。
 - 所有运行参数在**程序目录**的 `appsettings.json`；界面只是可视化入口（含链路编辑器与注册中心页）。
 - **可选的多机房自动互测**（注册中心）：每个节点只填“自己 + 中心”，链路自动生成/删除；不启用时行为与升级前完全一致。
-- 当前 **20 个源文件 + 1 个测试工程**，零 NuGet 依赖。
+- 当前 **26 个源文件 + 1 个测试工程**，零 NuGet 依赖。
 
 ---
 
@@ -58,7 +58,13 @@
 | `src/Views/RegistryPanel.xaml(.cs)` | 「注册中心」标签页（本节点/注册中心/状态/中心管理四区） |
 | `src/Views/RegistryNodeRow.cs` | 中心节点表的一行（分发勾选写中心侧 `centerHidden`）——**不引用 WPF** |
 | `src/Views/Ipv4Box.xaml(.cs)` | 标准 IPv4 输入控件（四段式、只收数字、自动跳段、越界标红、可切主机名） |
-| `tests/LineTester.Tests/Program*.cs` | 零依赖自检宿主（853 项断言，含真实回环网络、真实窗口端到端、注册协议与注册页） |
+| `src/Isp/IspCarrier.cs` | 运营商归类与「同/跨运营商」判定（纯逻辑，含实测踩坑的字段优先级）——**不联网** |
+| `src/Isp/IspRecords.cs` | 运营商记录 / 抓取结果 / 状态与灯色枚举 |
+| `src/Isp/IspAddressRules.cs` | 只查公网地址的过滤 + 从 `ip:port`、`[v6]:port` 取主机 |
+| `src/Isp/IspCacheStore.cs` | `ip-isp-cache.json` 缓存（TTL + 原子写 + 自动清理） |
+| `src/Isp/IspApiFetcher.cs` | ip-api 批量接口（`X-Rl`/`X-Ttl` 限流处理、`lang=zh-CN`） |
+| `src/Isp/IspLookupService.cs` | 后台查询服务（去重/解析/批量/退避/限流停手），`FetcherFactory` 是自检缝 |
+| `tests/LineTester.Tests/Program*.cs` | 零依赖自检宿主（946 项断言，含真实回环网络、真实窗口端到端、注册协议、注册页、运营商判定） |
 
 ---
 
@@ -280,7 +286,7 @@ git -c http.sslBackend=openssl -c http.proxy=http://127.0.0.1:17895 -c https.pro
 ## 8. 本次会话的验证证据
 
 - `dotnet build .\LineTester.sln -c Release` → **0 警告 0 错误**（每次改动后均重跑）
-- 自检 **853/853 通过**；收尾阶段每改一轮都重跑，现场反馈修复后 8 次、顶部节点名后 3 次连跑全绿
+- 自检 **946/946 通过**；收尾阶段每改一轮都重跑，现场反馈修复后 8 次、顶部节点名后 3 次连跑全绿
 - 现场反馈的三件事都有实测断言（不是靠肉眼看界面）：
   ① 运行中取消勾选 TCP → 用"能数包的纯回显服务端"确认对端**不再收到新的 TCP**，而 UDP 照常；
   ② "发 TCP 却显示 UDP" → 用"只开 TCP / 只开 UDP"两段实测：只开 TCP 时明细里全是 TCP 行、
@@ -288,6 +294,9 @@ git -c http.sslBackend=openssl -c http.proxy=http://127.0.0.1:17895 -c https.pro
   ③ 地址/端口输入 → `Ipv4Box` 四段式 + 端口/周期只收数字，配置层同时校验地址格式
      （"203.0.113" 这种少一段的会被拦下，`.NET` 的 `IPAddress.TryParse` 会把它当 203.0.0.113 放行，已避开）
 - 发布：`dotnet publish … -r win-x64 --self-contained … -o .\publish` → `publish\LineTester.exe`（约 162 MB，含新模板 `appsettings.json`）
+- **运营商/跨网判定**（本会话新增）：判定规则用**实测数据**钉住（联通老网通 `CNC/CHINA169`、
+  `114.114.114.114` 的 isp/as 自相矛盾、阿里/腾讯/百度是云厂商自己的 AS）；查询管线用**假抓取器**覆盖
+  （去重、只查公网、缓存落盘与过期、限流后停手、失败降级、关闭后零请求），自检**不依赖外网**。
 - 渲染 + 排版审查通过：非法行确实标红、校验列给出原因、静态区域无文本裁剪/越界、**注册页在真实窗口里无横向裁剪**
 - 兼容矩阵逐行证据（见 §7 第一条）；注册三节点端到端（同进程 3 个真实 `ProbeServer`）覆盖自动生成链路、中心删除传播、离线重连后消失、中心不可达不影响探测
 - 测试过程中被断言抓出并修掉的**真实缺陷**：

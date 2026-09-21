@@ -30,6 +30,9 @@ public sealed class AppConfig
     /// <summary>链路注册与同步（多机房自动互测）配置。默认不启用，行为与升级前完全一致。</summary>
     public RegistrarConfig Registrar { get; set; } = new();
 
+    /// <summary>运营商信息查询（ip-api）。默认开启；关掉后不做任何联网查询，表格该列显示"未启用"。</summary>
+    public IspConfig Isp { get; set; } = new();
+
     public static AppConfig Default() => new()
     {
         Links =
@@ -37,6 +40,31 @@ public sealed class AppConfig
             new LinkConfig { Name = "示例-机房B", Host = "127.0.0.1", Port = 9001, Tcp = true, Udp = true }
         }
     };
+}
+
+/// <summary>
+/// 运营商信息查询配置（用于判断"是否跨运营商测试"）。
+///
+/// 默认开启，但**可以关掉**：免费接口只支持 HTTP 明文、且官方声明不允许商用，
+/// 关掉之后程序一个字节都不会往外发，表格对应列显示"未启用"。
+/// </summary>
+public sealed class IspConfig
+{
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>批量查询地址（换成自建代理时改这里）。</summary>
+    public string Endpoint { get; set; } = "http://ip-api.com/batch";
+
+    /// <summary>缓存有效期（天）：运营商归属很少变，默认 30 天。</summary>
+    public int CacheDays { get; set; } = 30;
+
+    /// <summary>单次请求超时（毫秒）。</summary>
+    public int TimeoutMs { get; set; } = 5000;
+
+    public const int MinCacheDays = 1;
+    public const int MaxCacheDays = 365;
+    public const int MinTimeoutMs = 500;
+    public const int MaxTimeoutMs = 30000;
 }
 
 /// <summary>链路来源标识。</summary>
@@ -444,6 +472,29 @@ public sealed class StatRow : INotifyPropertyChanged
     /// <summary>当前（最近一次）失败原因；一旦探测成功就恢复为 “-”。</summary>
     public string LastFailure { get => _lastFailure; set => Set(ref _lastFailure, value); }
 
+    // ---- 运营商信息（跨运营商测试判定） ----
+
+    private string _localCarrier = "-";
+    private string _remoteCarrier = "-";
+    private string _crossNetText = "";
+    private string _crossNetState = "unknown";
+    private string _carrierDetail = "";
+
+    /// <summary>本端出口 IP 的运营商（如"电信"）。</summary>
+    public string LocalCarrier { get => _localCarrier; set => Set(ref _localCarrier, value); }
+
+    /// <summary>目标地址的运营商（如"联通"、"阿里云"）。</summary>
+    public string RemoteCarrier { get => _remoteCarrier; set => Set(ref _remoteCarrier, value); }
+
+    /// <summary>跨网结论文案（"同运营商（电信）"/"跨运营商（电信 → 联通）"）。</summary>
+    public string CrossNetText { get => _crossNetText; set => Set(ref _crossNetText, value); }
+
+    /// <summary>状态灯状态：same（绿）/ cross（红）/ unknown（灰）/ disabled（不判定）。</summary>
+    public string CrossNetState { get => _crossNetState; set => Set(ref _crossNetState, value); }
+
+    /// <summary>提示框明细：两侧的 ISP / AS 原文，出问题时人工核对用。</summary>
+    public string CarrierDetail { get => _carrierDetail; set => Set(ref _carrierDetail, value); }
+
     public void CopyFrom(StatRow other)
     {
         Avg = other.Avg;
@@ -458,6 +509,44 @@ public sealed class StatRow : INotifyPropertyChanged
         SeenFrom = other.SeenFrom;
         LastFailure = other.LastFailure;
     }
+
+    /// <summary>
+    /// 写入运营商信息。逻辑放在这里（而不是界面里）是为了能被零依赖自检直接断言：
+    /// 传 null 表示"还没查到"，此时显示"查询中…"而不是假装未知。
+    /// </summary>
+    public void SetCarrier(Isp.IspRecord? local, Isp.IspRecord? remote, bool enabled)
+    {
+        if (!enabled)
+        {
+            LocalCarrier = "未启用";
+            RemoteCarrier = "未启用";
+            CrossNetState = "disabled";
+            CrossNetText = "未启用查询";
+            CarrierDetail = "「显示运营商信息」未勾选：程序不会把 IP 发给 ip-api。";
+            return;
+        }
+
+        var verdict = Isp.IspCarrier.Compare(local, remote);
+
+        LocalCarrier = local is null ? "查询中…" : NameOf(local);
+        RemoteCarrier = remote is null ? "查询中…" : NameOf(remote);
+
+        CrossNetState = verdict.State switch
+        {
+            Isp.CrossNetState.Same => "same",
+            Isp.CrossNetState.Cross => "cross",
+            Isp.CrossNetState.Disabled => "disabled",
+            _ => "unknown"
+        };
+
+        CrossNetText = verdict.Short;
+        CarrierDetail = verdict.Detail;
+    }
+
+    private static string NameOf(Isp.IspRecord record)
+        => Isp.IspCarrier.Classify(record, out var display) == Isp.CarrierKind.Unknown && !record.Ok
+            ? record.FailText
+            : display;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 

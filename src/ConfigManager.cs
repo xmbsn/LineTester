@@ -147,6 +147,7 @@ public static class ConfigManager
             problems.Add("ConsecutiveLossWarn 不能小于 1");
 
         ValidateRegistrar(config.Registrar, problems);
+        ValidateIsp(config.Isp, problems);
 
         if (config.Links is not null)
         {
@@ -165,6 +166,27 @@ public static class ConfigManager
 
         error = string.Join("；", problems);
         return problems.Count == 0;
+    }
+
+    /// <summary>
+    /// 运营商查询校验：只在启用时校验（未启用时字段留空/默认值都不该拦住保存）。
+    /// </summary>
+    private static void ValidateIsp(IspConfig? isp, List<string> problems)
+    {
+        if (isp is null || !isp.Enabled) return;
+
+        if (string.IsNullOrWhiteSpace(isp.Endpoint) ||
+            !(isp.Endpoint.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+              isp.Endpoint.StartsWith("https://", StringComparison.OrdinalIgnoreCase)))
+        {
+            problems.Add("Isp.Endpoint 必须是 http:// 或 https:// 开头的地址");
+        }
+
+        if (isp.CacheDays < IspConfig.MinCacheDays || isp.CacheDays > IspConfig.MaxCacheDays)
+            problems.Add($"Isp.CacheDays 必须在 {IspConfig.MinCacheDays}~{IspConfig.MaxCacheDays} 之间（当前是 {isp.CacheDays}）");
+
+        if (isp.TimeoutMs < IspConfig.MinTimeoutMs || isp.TimeoutMs > IspConfig.MaxTimeoutMs)
+            problems.Add($"Isp.TimeoutMs 必须在 {IspConfig.MinTimeoutMs}~{IspConfig.MaxTimeoutMs} 之间（当前是 {isp.TimeoutMs}）");
     }
 
     /// <summary>

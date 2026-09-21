@@ -10,6 +10,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
+using LineTester.Isp;
 using LineTester.Registry;
 using LineTester.Views;
 
@@ -93,6 +94,10 @@ public partial class MainWindow : Window
     private RegistryStore? _registryStore;
     private RegistryCenterService? _registryCenter;
 
+    // ---- 运营商查询（跨运营商判定）----
+
+    private IspLookupService? _isp;
+
     /// <summary>
     /// 探测循环每轮开始时读取的“当前会话号”。
     /// 必须每轮重新读取：若固定为启动时的值，点击“清除”后所有结果都会被当成陈旧数据丢弃，
@@ -168,6 +173,9 @@ public partial class MainWindow : Window
         // 会触发 Protocol_Changed，从而把 _liveTcp/_liveUdp 同步到最新
         TcpCheck.IsChecked = cfg.EnableTcp;
         UdpCheck.IsChecked = cfg.EnableUdp;
+
+        // 会触发 IspCheck_Changed，从而按配置开关运营商查询
+        IspCheck.IsChecked = cfg.Isp.Enabled;
 
         RegistryTabPanel.Load(cfg.Registrar);
 
@@ -708,6 +716,7 @@ public partial class MainWindow : Window
             UpdateLinkSummary();
 
             StartRegistryClient(notes);
+            StartIspLookup();
 
             var cts = new CancellationTokenSource();
             _cts = cts;
@@ -769,6 +778,7 @@ public partial class MainWindow : Window
         cts?.Cancel();
 
         StopRegistryClient();
+        StopIspLookup();
 
         _server?.Dispose();
         _server = null;
@@ -812,7 +822,6 @@ public partial class MainWindow : Window
     {
         // 未启用注册：一个字节都不发，状态栏也不加任何提示（与升级前完全一致，规格 §11.3）
         if (!_settings.Registrar.Enabled) return;
-
         var options = new RegistryClientOptions
         {
             NodeId = _settings.Registrar.NodeId,
@@ -1011,6 +1020,97 @@ public partial class MainWindow : Window
     {
         RefreshRegistryUi();
         UpdateStatus("注册中心清单已改动：其他节点会在各自的同步周期内更新链路（默认 300 秒）");
+    }
+
+    // ---------------- 运营商查询（跨运营商判定） ----------------
+
+    /// <summary>运营商缓存文件：与配置文件同目录。</summary>
+    private static string IspCachePath
+        => Path.Combine(Path.GetDirectoryName(ConfigManager.ConfigPath) ?? AppContext.BaseDirectory, "ip-isp-cache.json");
+
+    /// <summary>
+    /// 按配置启停运营商查询。关掉后**一个字节都不会往外发**（现场可能有内网隔离/合规要求）。
+    /// </summary>
+    private void ApplyIspSetting(bool enabled)
+    {
+        _settings.Isp.Enabled = enabled;
+
+        if (!enabled)
+        {
+            StopIspLookup();
+            foreach (var row in _statRows.Values) row.SetCarrier(null, null, enabled: false);
+
+            if (_cts is not null) UpdateStatus("已关闭运营商信息查询（不再向 ip-api 发送任何地址）");
+            return;
+        }
+
+        StartIspLookup();
+
+        // 只在测试运行中提示，避免开窗时就刷一条与当前动作无关的状态
+        if (_cts is not null)
+            UpdateStatus("已启用运营商信息查询：只查公网地址、结果缓存 " + _settings.Isp.CacheDays + " 天");
+    }
+
+    private void StartIspLookup()
+    {
+        if (_isp is not null || !_settings.Isp.Enabled) return;
+
+        var ttl = TimeSpan.FromDays(Math.Clamp(_settings.Isp.CacheDays, IspConfig.MinCacheDays, IspConfig.MaxCacheDays));
+        _isp = new IspLookupService(_settings.Isp, new IspCacheStore(IspCachePath, ttl));
+    }
+
+    private void StopIspLookup()
+    {
+        var service = _isp;
+        _isp = null;
+        if (service is null) return;
+
+        try { service.Dispose(); } catch { }
+    }
+
+    private void IspCheck_Changed(object sender, RoutedEventArgs e)
+        => ApplyIspSetting(IspCheck.IsChecked == true);
+
+    /// <summary>
+    /// 给一行统计补上"本端 / 目标运营商"与跨网结论。
+    ///
+    /// 目标：优先用探测实际看到的地址；没有就用链路配置里的主机名（由查询服务解析，结果带缓存）。
+    /// 本端：用报文回显的"对端看到的本端源地址"——那是这条链路真实的出口 IP，
+    /// 不需要再问第三方"我的 IP 是多少"。
+    /// </summary>
+    private void ApplyCarrier(StatRow row)
+    {
+        var enabled = _isp?.Enabled == true && IspCheck.IsChecked == true;
+
+        if (!enabled)
+        {
+            row.SetCarrier(null, null, enabled: false);
+            return;
+        }
+
+        var remote = IspAddressRules.HostPart(row.Target);
+        var local = IspAddressRules.HostPart(row.SeenFrom);
+
+        if (remote.Length > 0) _isp!.Request(remote);
+        if (local.Length > 0 && IspAddressRules.IsPublicIp(local)) _isp!.Request(local);
+
+        IspRecord? localRecord;
+        if (IspAddressRules.IsPublicIp(local))
+        {
+            localRecord = _isp!.TryGet(local);
+        }
+        else
+        {
+            // 拿不到本端出口 IP：说清原因，别显示成"查询中…"（那会让人以为在等网络）
+            localRecord = new IspRecord
+            {
+                Ip = local,
+                Status = "fail",
+                Message = local.Length == 0 ? "尚无对端回显（探测还没成功过）" : "private range"
+            };
+        }
+
+        row.SetCarrier(localRecord, _isp!.TryGet(remote), enabled: true);
     }
 
     // ---------------- 探测循环 ----------------
@@ -1217,10 +1317,12 @@ public partial class MainWindow : Window
             if (_statRows.TryGetValue(incoming.Key, out var existing))
             {
                 existing.CopyFrom(incoming);
+                ApplyCarrier(existing);
             }
             else
             {
                 _statRows[incoming.Key] = incoming;
+                ApplyCarrier(incoming);
                 _stats.Insert(Math.Min(i, _stats.Count), incoming);
             }
         }
@@ -1311,11 +1413,24 @@ public partial class MainWindow : Window
         if (registry is not null)
             note = string.IsNullOrEmpty(note) ? registry.Text : note + " | " + registry.Text;
 
+        // 运营商查询出问题（被限流/查询失败）时也提示一句：它是"附加信息"，从不影响探测
+        var isp = _isp?.Status;
+        var ispWarning = false;
+        if (isp is { Enabled: true } && (isp.LastError is not null || isp.Throttled))
+        {
+            var text = isp.Throttled
+                ? $"运营商查询被限流，{Math.Max(1, (int)(isp.ThrottledUntilUtc!.Value - DateTime.UtcNow).TotalSeconds)} 秒后重试"
+                : "运营商查询失败：" + isp.LastError;
+
+            note = string.IsNullOrEmpty(note) ? text : note + " | " + text;
+            ispWarning = true;
+        }
+
         StatusNote.Text = note ?? "";
         StatusNote.Visibility = string.IsNullOrEmpty(note) ? Visibility.Collapsed : Visibility.Visible;
         StatusNote.Foreground = new SolidColorBrush(_statusIsError
             ? Color.FromRgb(0xC5, 0x22, 0x1F)
-            : registry?.Warning == true
+            : registry?.Warning == true || ispWarning
                 ? Color.FromRgb(0xB2, 0x6A, 0x00)
                 : Color.FromRgb(0x5F, 0x63, 0x68));
 

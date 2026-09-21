@@ -62,6 +62,9 @@ internal static partial class Program
             TestRegistryPanelUi();
             TestRegistryMainWindowUi();
             TestNodeNameHeader();
+            TestIspCarrier();
+            TestIspLookupService();
+            TestIspUi();
             TestLinkToggleWhileRunning();
             await TestRegistryCompatMatrixAsync();
             TestRepoTemplateLoads();
@@ -343,7 +346,7 @@ internal static partial class Program
                     .Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
                 var expectedTop = new[]
                 {
-                    "ConsecutiveLossWarn", "EnableTcp", "EnableUdp", "IntervalMs", "Links", "ListenPort",
+                    "ConsecutiveLossWarn", "EnableTcp", "EnableUdp", "IntervalMs", "Isp", "Links", "ListenPort",
                     "LossWarnPercent", "Registrar", "StatWindowMinutes", "TimeoutMs", "WarningRttMs"
                 };
                 Check("顶层字段与配置契约完全一致（无派生字段泄漏）",
