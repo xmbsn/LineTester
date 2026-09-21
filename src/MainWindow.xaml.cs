@@ -750,11 +750,8 @@ public partial class MainWindow : Window
 
     private void StartRegistryClient(List<string> notes)
     {
-        if (!_settings.Registrar.Enabled)
-        {
-            notes.Add("未启用注册同步（只监听应答与探测）");
-            return;
-        }
+        // 未启用注册：一个字节都不发，状态栏也不加任何提示（与升级前完全一致，规格 §11.3）
+        if (!_settings.Registrar.Enabled) return;
 
         var options = new RegistryClientOptions
         {

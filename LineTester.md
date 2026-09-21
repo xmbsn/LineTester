@@ -1,26 +1,31 @@
 # LineTester 项目备忘（会话总结 / 设计约定 / 踩坑记录）
 
 > 用途：下次会话快速恢复上下文。本文件只覆盖 **LineTester 项目**（`E:\dsh\LineTester`）。
-> **远端**：`https://github.com/xmbsn/LineTester`（**private**，分支 `main`，tip = `576d07c`）
-> **最新会话 2026-09-20**：项目分析 → 按发现清单修复（3 个 P0 + 4 个 P1 + 一批 P2）→ 新增「清除」按钮、
-> TCP/UDP 协议勾选、链路编辑器（含防误删）、界面重排、报文带对端源地址、失败原因分类、日志按天滚动 →
-> 上传 GitHub（private）。自检从 **0 → 284 项断言**，全程 `0 警告 0 错误`。
+> **远端**：`https://github.com/xmbsn/LineTester`（**private**，分支 `main`，tip = `3394c9f`）
+> **最新会话 2026-09-20**：
+> ① 项目分析 → 按发现清单修复（3 个 P0 + 4 个 P1 + 一批 P2）→ 新增「清除」按钮、TCP/UDP 协议勾选、
+> 链路编辑器（含防误删）、界面重排、报文带对端源地址、失败原因分类、日志按天滚动 → 上传 GitHub（private）；
+> ② **链路注册协议 v1（多机房自动互测）** 全流程落地：规格 → 计划 → 三个切片（端口分流与中心服务、
+> 客户端同步循环与三节点端到端、注册设置页与中心节点管理 + 链路页联动），规格 §12 兼容矩阵逐行验证。
+> 自检从 **0 → 752 项断言**，全程 `0 警告 0 错误`。
 
 ---
 
 ## 0. 会话续接提示（下次新会话从这里开始）
 
 > 读取 `E:\dsh\LineTester\LineTester.md`（本文件）与 `README.md`，然后：
-> ① `dotnet build .\LineTester.sln -c Release` 确认可编译；
-> ② `dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release` 跑自检（应 284/284 通过）；
-> ③ 改任何代码前先看本文件 **§4 关键设计约定** 与 **§5 本机环境坑**（这两节能避免重复踩坑）。
+> ① `dotnet build .\LineTester.sln -c Release` 确认可编译（应为 0 警告 0 错误）；
+> ② `dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release` 跑自检（应 752/752 通过）；
+> ③ 改任何代码前先看本文件 **§4 关键设计约定** 与 **§5 本机环境坑**（这两节能避免重复踩坑）；
+> ④ 改注册协议/注册页前**先读 `docs/REGISTRY-PROTOCOL.md`**（协议契约的 SSOT，实现期修正已回写）。
 > 注意：**测试工程不在 .sln 里**（本机 SDK 损坏，见 §5.2），必须按路径构建/运行。
 
 **核心事实（一句话版）**
 
 - .NET 8 WPF 桌面工具：**主动探测 + 被动应答一体**，两端互相探测对方的监听端口；输出实时统计与按天滚动的 CSV 日志。
-- 所有运行参数在**程序目录**的 `appsettings.json`；界面只是可视化入口（含链路编辑器）。
-- 当前 **9 个源文件 + 1 个测试工程**，零 NuGet 依赖。
+- 所有运行参数在**程序目录**的 `appsettings.json`；界面只是可视化入口（含链路编辑器与注册中心页）。
+- **可选的多机房自动互测**（注册中心）：每个节点只填“自己 + 中心”，链路自动生成/删除；不启用时行为与升级前完全一致。
+- 当前 **19 个源文件 + 1 个测试工程**，零 NuGet 依赖。
 
 ---
 
@@ -30,16 +35,29 @@
 
 | 文件 | 职责 |
 |---|---|
-| `src/Models.cs` | `AppConfig` / `LinkConfig` / `ProbeResult` / `StatRow` / `LinkRow` |
-| `src/ConfigManager.cs` | appsettings.json 读写（原子写+重试）、统一的链路校验规则 |
-| `src/ProbeServer.cs` | 被动端：TCP/UDP 双栈监听、原样回显、按标记附加"对端源地址" |
+| `src/Models.cs` | `AppConfig` / `LinkConfig` / `RegistrarConfig` / `ProbeResult` / `StatRow` / `LinkRow` |
+| `src/ConfigManager.cs` | appsettings.json 读写（原子写+重试）、统一的链路/注册配置校验规则 |
+| `src/ProbeServer.cs` | 被动端：TCP/UDP 双栈监听、原样回显、按标记附加"对端源地址"、按 `LT1|` 前缀分流注册协议 |
 | `src/ProbeClient.cs` | 主动端：探测、RTT/建连分离计时、回包校验、失败原因分类 |
 | `src/Session.cs` | 统计会话（滑动窗口 / 连续丢包 / 源地址 / 失败原因 / epoch） |
 | `src/Statistics.cs` | 百分位、四级状态判定（纯函数，可测） |
 | `src/CsvLogWriter.cs` | 后台通道 + 按天分目录滚动写 CSV |
 | `src/FailureKinds.cs` | 失败原因 token ↔ 中文文案 |
-| `src/MainWindow.xaml(.cs)` | 界面、探测循环、节流刷新、链路编辑器 |
-| `tests/LineTester.Tests/Program.cs` | 零依赖自检宿主（284 项断言，含真实回环网络与真实窗口端到端） |
+| `src/AtomicFile.cs` | 原子写文件 + 瞬时占用重试（配置与中心清单共用） |
+| `src/MainWindow.xaml(.cs)` | 界面、探测循环、节流刷新、链路编辑器、注册同步的接线与生命周期 |
+| `src/Registry/RegistryProtocol.cs` | 帧编解码（`LT1|TYPE|MAC|payload`）、消息 DTO、错误码 |
+| `src/Registry/RegistryAuth.cs` | HMAC-SHA256、时间窗、nonce 防重放、常量时间比较 |
+| `src/Registry/RegistryChunking.cs` | 大快照分块切分与位图合并 |
+| `src/Registry/RegistryAddressRules.cs` | 可分发地址规则（回环/未指定/链路本地一律拒绝） |
+| `src/Registry/RegistryStore.cs` | 中心清单 + revision + 持久移除名单 + 在线判定 |
+| `src/Registry/RegistrySync.cs` | 快照应用到本地链路（增/改/删/保留 LocalDisabled/不动手工链路）——**纯函数** |
+| `src/Registry/RegistryCenterService.cs` | 中心服务：认证链、按 reqId 幂等、按类型限流、分块传输 |
+| `src/Registry/RegistryClient.cs` | 客户端：长驻 UDP socket、请求闸门、心跳/同步循环与退避、快照解析 |
+| `src/Registry/RegistrarDraft.cs` | 注册配置页的字段草稿与校验（**不引用 WPF，可自检**） |
+| `src/Registry/RegistryUiText.cs` | 注册相关文案（连接状态/地址核对/分发状态/节点状态）——**不引用 WPF** |
+| `src/Views/RegistryPanel.xaml(.cs)` | 「注册中心」标签页（本节点/注册中心/状态/中心管理四区） |
+| `src/Views/RegistryNodeRow.cs` | 中心节点表的一行（分发勾选写中心侧 `centerHidden`）——**不引用 WPF** |
+| `tests/LineTester.Tests/Program*.cs` | 零依赖自检宿主（752 项断言，含真实回环网络、真实窗口端到端、注册协议与注册页） |
 
 ---
 
@@ -99,17 +117,35 @@ dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release
 - 创建 **private** 仓库 `xmbsn/LineTester` 并推送 `main`；本地 `main` 跟踪 `origin/main`。
 - 推送方式见 §5.1（schannel 坏 + 代理 + openssl）。
 
+### 3.4 链路注册协议 v1（多机房自动互测）
+
+**需求**：机房全网格互测，N 个机房要 N×(N-1) 条链路，手工录入不现实；现场**出口只映射了一个端口**，
+因此注册中心与探测**必须复用同一个监听端口**；TCP 入向不通 → **UDP 优先**。
+
+| 切片 | 内容 | 提交 |
+|---|---|---|
+| 1 | 配置段与链路来源字段、帧协议、HMAC/防重放、分块位图、地址规则、中心清单与 rev、快照应用 | `4603756` |
+| 2 | 端口按 `LT1|` 前缀分流、中心服务（幂等/限流/分块）、客户端同步循环、三节点端到端 | `bae3f25` |
+| 3 | 「注册中心」设置页、中心节点管理（移除/恢复/分发）、链路页「来源」列与本地停测 | `3394c9f` |
+
+关键设计（详见规格）：**节点清单**（非链路矩阵）、**全量快照语义**（删除天然传播到离线节点，不需要墓碑）、
+**回环地址绝不分发**（否则对端测的是自己的回环 = 假线路）、`PublicHost` 必须手工填（出向源端口 ≠ 入向映射端口）、
+**两层可分发**（对端 `Distributable` 与中心 `centerHidden`）、本地停测用 `LocalDisabled`（同步不覆盖）。
+
 ---
 
 ## 4. 关键设计约定（改代码前必读）
 
 ### 4.1 配置
 
-- 顶层键**固定 10 个**（有契约测试守着，多一个派生属性就会失败）：`ListenPort` `IntervalMs` `TimeoutMs` `WarningRttMs` `StatWindowMinutes` `LossWarnPercent` `ConsecutiveLossWarn` `EnableTcp` `EnableUdp` `Links`
-- `Links[]` 固定 5 个键：`Name` `Host` `Port` `Tcp` `Udp`
+- 顶层键**固定 11 个**（有契约测试守着，多一个派生属性就会失败）：`ListenPort` `IntervalMs` `TimeoutMs` `WarningRttMs` `StatWindowMinutes` `LossWarnPercent` `ConsecutiveLossWarn` `EnableTcp` `EnableUdp` `Links` `Registrar`
+- `Links[]` 固定 8 个键：`Name` `Host` `Port` `Tcp` `Udp` `Source` `NodeId` `LocalDisabled`
+  （`Source` 默认 `manual`；老配置缺这三个键 → 全部按"本地手工链路"处理，兼容）
 - **只读派生属性绝不能加到配置类上**（`System.Text.Json` 会把它序列化进文件，现场看不懂）——曾经踩过：`LinkConfig.Key`/`Target` 被写进 `publish\appsettings.json`。
 - 缺键 = 用代码默认值（旧配置直接兼容）；**未知键静默忽略**（拼错不报错，会静默用默认值）。
 - 保存会**重写整个文件**：手写注释与自定义键会丢失（注释与尾逗号在**读取**时是允许的）。
+- `Registrar.Enabled=false`（默认）= 与升级前完全一致：不发注册消息、状态栏不加任何注册提示。
+- 中心清单是**独立文件** `registry.json`（与配置文件同目录，已 gitignore），不是配置的一部分。
 
 ### 4.2 探测与统计口径
 
@@ -135,10 +171,16 @@ dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release
 
 ### 4.4 界面
 
-- 表格统一在 `Window.Resources` 里的隐式 `DataGrid`/`DataGridColumnHeader`/`DataGridRow` 样式；**隔行底纹用行样式触发器**实现（用 `AlternatingRowBackground` 会盖掉"非法行标红"）。
+- 表格统一在 `Window.Resources` 里的隐式 `DataGrid`/`DataGridColumnHeader`/`DataGridRow` 样式；**隔行底纹用行样式触发器**实现（用 `AlternatingRowBackground` 会盖掉"非法行标红"）；链路页的行样式里"注册链路配色"触发器必须放在"非法标红"**之前**（后面的赢）。
 - 按钮样式：`BaseButton`（键控）+ **隐式 `Style TargetType="Button"`** + `PrimaryButton`。曾经因为只定义了键控样式，导致除主按钮外全部退回 WPF 默认外观。
-- 状态栏四段：`StatusDot` / `StatusText` / `StatusParams` / `StatusSamples` + 独立的 `StatusNote`（出错时变红）。
+- 状态栏四段：`StatusDot` / `StatusText` / `StatusParams` / `StatusSamples` + 独立的 `StatusNote`（测试/日志出错变红，注册告警变橙）。
 - 链路改动是**配置类**变更，需点「启动测试」生效（页脚会提示"运行中的测试仍在使用启动时的链路"）；**协议勾选是唯一即时生效的开关**。
+- **注册链路是例外**：探测循环每轮读 `_liveLinks` 快照，中心同步下来的链路当场开始探测、被删的链路当场消失。
+- `RegistryPanel` 是**独立解析的 UserControl**：`Window.Resources` 的隐式样式**不会**作用到它的子元素
+  （隐式样式在元素初始化时解析，那一刻它还没挂到窗口树上），因此它在自己的 `UserControl.Resources` 里
+  复制了几个同名样式键（`RegCard`/`RegLabel`/`RegBox`/`RegCheck`/`RegButton`）。
+- 界面里的**判断逻辑一律外置**成不引用 WPF 的纯类（`RegistrarDraft`/`RegistryUiText`/`RegistryNodeRow`/
+  `RegistrySync`），页面只做装配——没有视觉模型可用，一切只能靠零依赖自检断言。
 
 ### 4.5 测试工程（重要）
 
@@ -146,8 +188,13 @@ dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release
 - 覆盖：纯逻辑（百分位/状态/会话/配置/CSV）+ **真实回环网络**（TCP/UDP/IPv6、取消、伪装回包、新旧版本互操作）+ **真实窗口端到端**（STA 线程 + 消息泵驱动 Start/Clear/Stop/协议勾选/链路编辑器）。
 - **测试缝**（都为测试真实关卡而非内部小函数）：
   - `ConfigManager.OverridePath` —— 覆盖配置文件路径；
-  - `MainWindow._alert` / `_confirmDelete` —— 用反射替换掉模态框。
+  - `MainWindow._alert` / `_confirmDelete` / `RegistryPanel.Confirm` / `RegistryPanel.Alert` —— 用反射替换掉模态框。
 - 异步写入器有 `WaitForIdleAsync()`："待写计数归零"发生在 Flush **之后**，所以返回 true 即数据已落盘（测试因此确定性，不靠 sleep）。
+- **端口选择**：`FindBindablePort()` 先用系统临时端口，失败后**随机扫 20000~60000**。
+  Windows 按顺序分配临时端口，一旦游标落进一段保留/排除区间（Hyper-V/WSL 常占大段），
+  连着几十个候选会一起失败——只试临时端口时实测偶发"找不到可绑定的端口"把整轮自检搞崩。
+- `Main` 把全部用例包在 try/catch 里：**宿主自身的异常也以"失败"收场并打印断言汇总**，
+  不再以未处理异常退出（否则输出被截断，看不到跑到哪一步）。
 
 ---
 
@@ -207,9 +254,11 @@ git -c http.sslBackend=openssl -c http.proxy=http://127.0.0.1:17895 -c https.pro
 
 ## 7. 待办 / 可选下一步
 
-- [ ] **链路注册协议（多机房自动互测）**：设计已批准，规格见 `docs/REGISTRY-PROTOCOL.md`（UDP 优先 + 分块重传、回环地址绝不分发、快照语义删除传播、`Registrar` 配置段）。
-      **下一步：按 §15 的 4 个切片写实现计划并开工**（先落实现计划，再动代码）。
+- [x] **链路注册协议（多机房自动互测）**：已实现并验证。规格 `docs/REGISTRY-PROTOCOL.md`（SSOT）、计划 `docs/aegis/plans/2026-09-20-link-registry.md`；三个切片均已提交推送（`4603756` / `bae3f25` / `3394c9f`）。
+      兼容矩阵（规格 §12）逐行有断言：新↔新、新→老节点（判"不是注册中心"）、新→新非中心（`ERR unsupported`）、老探测→新节点（**逐字节**回显）、老配置→无注册行为。
 - [ ] **重新发布**（`.\build.bat`），让机房用上当前改动；建议两端都升级才能看到 `seen_from`（只升一端也不会坏）。
+- [ ] 现场可用性待验证（本机无法模拟真实多机房）：三个机房的公网映射、密钥一致性、`PublicHost` 填写是否正确；建议先在一个机房内用两台机器 + `127.0.0.1` 中心跑一遍。
+- [ ] 可选：`Registrar` 增加"中心地址备选列表"（当前中心单点，切换需改各节点配置）。
 - [ ] 可选：`LogRetentionDays`（保留 N 天自动清理，默认 0 = 不删；涉及删数据，未默认开启）。
 - [ ] 可选：`Links` 支持**TCP/UDP 分开的公网端口**（当前靠"拆两条链路"变通）。
 - [ ] 可选：被动端统计"本机收到多少探测包"（现在被动端不记录入站探测，只能抓包看）。
@@ -220,9 +269,20 @@ git -c http.sslBackend=openssl -c http.proxy=http://127.0.0.1:17895 -c https.pro
 
 ## 8. 本次会话的验证证据
 
-- `dotnet build .\LineTester.sln -c Release` → **0 警告 0 错误**（多次）
-- 自检 **284/284 通过**，连续多轮稳定（`exit=0`）
-- 渲染 + 排版审查通过：非法行确实标红、校验列给出原因、静态区域无文本裁剪/越界
-- 真实 CSV 证据（回环）：`…,seq,probe_id,seen_from,failure` 列齐全；`seen_from` 为客户端临时源端口；RTT 亚毫秒（`0.150` / `0.412`）
-- 测试过程中被断言抓出并修掉的**真实缺陷**：① 清除后统计永远无法恢复（epoch 被固定）；② `File.Move` 覆盖目标偶发 `UnauthorizedAccessException`（索引器/杀软瞬时占用）；③ 界面按钮样式只定义了键控样式导致四个按钮退回默认外观；④ 权限：链路名可来自界面输入，已加"恶意名字不越出日志根目录"断言
-- 被断言纠正的**错误预期**：Windows 上"被拒绝"约 2 秒才返回（不是瞬时）；对端有未读数据时关闭连接会回 RST（不是干净的 FIN）
+- `dotnet build .\LineTester.sln -c Release` → **0 警告 0 错误**（每次改动后均重跑）
+- 自检 **757/757 通过**；T14 收尾时连续 **10 次** `exit=0`（此前 5 次、3 次批次同样全绿）
+- 发布：`dotnet publish … -r win-x64 --self-contained … -o .\publish` → `publish\LineTester.exe`（约 162 MB，含新模板 `appsettings.json`）
+- 渲染 + 排版审查通过：非法行确实标红、校验列给出原因、静态区域无文本裁剪/越界、**注册页在真实窗口里无横向裁剪**
+- 兼容矩阵逐行证据（见 §7 第一条）；注册三节点端到端（同进程 3 个真实 `ProbeServer`）覆盖自动生成链路、中心删除传播、离线重连后消失、中心不可达不影响探测
+- 测试过程中被断言抓出并修掉的**真实缺陷**：
+  ① 清除后统计永远无法恢复（epoch 被固定）；
+  ② `File.Move` 覆盖目标偶发 `UnauthorizedAccessException`（索引器/杀软瞬时占用）；
+  ③ 界面按钮样式只定义了键控样式导致四个按钮退回默认外观；
+  ④ **切片 2→3 交接处**：`LinkRow.ToConfig()` 没回写 `Source/NodeId/LocalDisabled`——界面保存一次就把注册链路退化成手工链路；
+  ⑤ **节点身份每次保存被重新生成**——中心会把同一台机器当成新节点；
+  ⑥ `RegistryStore.RefreshOnlineState()` 从未被调用——"在线"状态会永久停住（现已由中心组装 ACK 时与界面刷新时调用）；
+  ⑦ `Start()` 的同步循环与"立即注册"并发时抢同一个 socket 的回包 → 间歇性"中心无应答"（已加请求闸门）。
+- 收尾阶段被发现的**自检宿主自身缺陷**（不是产品缺陷）：`FindBindablePort()` 只试系统临时端口，
+  Windows 顺序分配临时端口时若游标落进保留区间会连续失败 → 整轮自检以未处理异常崩掉（`exit=-532462766`）；
+  已改为"临时端口失败后退回随机扫描"，并让 `Main` 捕获宿主异常统一按失败收场。
+- 被断言纠正的**错误预期**：Windows 上"被拒绝"约 2 秒才返回（不是瞬时）；对端有未读数据时关闭连接会回 RST（不是干净的 FIN）；`UserControl` 拿不到窗口的隐式样式。

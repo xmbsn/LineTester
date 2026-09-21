@@ -1,7 +1,9 @@
 using System.Collections;
 using System.IO;
 using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
@@ -892,6 +894,215 @@ internal static partial class Program
 
         client.Stop();
         server.Dispose();
+    }
+
+    /// <summary>
+    /// 仓库根目录的 `appsettings.json` 是**发布模板**（会被复制到输出/发布目录）。
+    /// 它带就地注释，必须能被程序自己读进来——模板坏掉等于现场开局就报配置错误。
+    /// </summary>
+    private static void TestRepoTemplateLoads()
+    {
+        Section("发布模板：仓库根目录的 appsettings.json 可被读取");
+
+        var template = FindRepoFile("appsettings.json");
+        if (template is null)
+        {
+            Console.WriteLine("  [INFO] 未找到仓库根目录（跳过模板检查）");
+            return;
+        }
+
+        var previous = ConfigManager.OverridePath;
+        try
+        {
+            ConfigManager.OverridePath = template;
+
+            var loaded = ConfigManager.Load(out var error);
+            Eq("模板可被读取（注释与尾逗号不报错）", "", error ?? "");
+            Eq("模板里注册默认不启用（升级后行为不变）", false, loaded.Registrar.Enabled);
+            Eq("模板里链路默认是本地手工链路", LinkSources.Manual, loaded.Links[0].Source);
+            Eq("模板里示例链路的目标端口", 9001, loaded.Links[0].Port);
+            Check("模板里的注册字段被认出来（不是被当成未知键丢掉）",
+                loaded.Registrar.HeartbeatSeconds == 60 && loaded.Registrar.SyncSeconds == 300 &&
+                loaded.Registrar.MaxRetries == 5,
+                $"心跳={loaded.Registrar.HeartbeatSeconds} 同步={loaded.Registrar.SyncSeconds} 重传={loaded.Registrar.MaxRetries}");
+        }
+        finally
+        {
+            ConfigManager.OverridePath = previous;
+        }
+    }
+
+    /// <summary>从测试程序集位置向上找仓库根目录下的文件（用 LineTester.sln 作为根标记）。</summary>
+    private static string? FindRepoFile(string fileName)
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+
+        for (var i = 0; i < 8 && directory is not null; i++)
+        {
+            if (File.Exists(Path.Combine(directory.FullName, "LineTester.sln")))
+            {
+                var candidate = Path.Combine(directory.FullName, fileName);
+                return File.Exists(candidate) ? candidate : null;
+            }
+
+            directory = directory.Parent;
+        }
+
+        return null;
+    }
+
+    // ---------------- 兼容矩阵逐行验证 ----------------
+
+    /// <summary>
+    /// 规格 §12 兼容矩阵里最容易悄悄坏掉的两行：
+    /// ① 老探测 → 新节点：装了协议处理器之后，探测回显必须**逐字节**不变（老客户端是逐字节比对的）；
+    /// ② 老配置 → 新程序：没有 `Registrar` 段时一个字节的注册流量都不该产生。
+    /// （另外三行在既有用例里：新↔新见三节点端到端；新→老节点见"不是注册中心"；新→非中心见 unsupported。）
+    /// </summary>
+    private static async Task TestRegistryCompatMatrixAsync()
+    {
+        Section("兼容矩阵：老探测 → 新节点（逐字节）/ 老配置 → 无注册行为");
+
+        var port = FindBindablePort();
+        var server = new ProbeServer(port);
+
+        // 刻意装上协议处理器（新节点就是这样）：证明分流不会动到老路径
+        server.ProtocolHandler = (request, length, _, ct) =>
+            RegistryCenterService.RespondUnsupportedAsync("preshared", request, length, ct);
+
+        try
+        {
+            server.Start();
+        }
+        catch
+        {
+            Check("兼容用例节点启动", false, "端口不可绑定");
+            server.Dispose();
+            return;
+        }
+
+        // ---- 老客户端的探测报文格式：不带 v2 标记、可以没有换行 ----
+        var legacyBare = Encoding.UTF8.GetBytes("45|deadbeefdeadbeefdeadbeefdeadbeef");
+        var legacyV1 = Encoding.UTF8.GetBytes("46|deadbeefdeadbeefdeadbeefdeadbeef\n");
+
+        using (var udp = new UdpClient(AddressFamily.InterNetwork))
+        {
+            udp.Connect(IPAddress.Loopback, port);
+
+            await udp.SendAsync(legacyBare, legacyBare.Length);
+            var bareReply = (await udp.ReceiveAsync()).Buffer;
+            Check("老格式 UDP 探测（无换行）仍逐字节原样回显",
+                bareReply.AsSpan().SequenceEqual(legacyBare), Encoding.UTF8.GetString(bareReply));
+
+            await udp.SendAsync(legacyV1, legacyV1.Length);
+            var v1Reply = (await udp.ReceiveAsync()).Buffer;
+            Check("连带换行的老格式 UDP 也逐字节原样回显",
+                v1Reply.AsSpan().SequenceEqual(legacyV1), Encoding.UTF8.GetString(v1Reply));
+
+            // ---- 同一端口上的注册帧：明确回 ERR（而不是被当成探测包回显） ----
+            var register = RegistryProtocol.EncodeSigned("preshared", RegistryProtocol.TypeRegister,
+                RegistryProtocol.Serialize(new RegisterMessage
+                {
+                    ReqId = "req-1",
+                    NodeId = "node-x",
+                    Name = "节点X",
+                    Ip = "203.0.113.30",
+                    Port = 9000,
+                    Ts = RegistryAuth.NowUnixSeconds(),
+                    Nonce = RegistryAuth.NewNonce()
+                }));
+
+            await udp.SendAsync(register, register.Length);
+            var errorReply = (await udp.ReceiveAsync()).Buffer;
+
+            Check("同端口的注册帧被分流到协议路径（不是原样回显）",
+                RegistryProtocol.TryDecode(errorReply, errorReply.Length, out var errorType, out _, out var errorPayload) &&
+                errorType == RegistryProtocol.TypeError,
+                Encoding.UTF8.GetString(errorReply));
+
+            var error = RegistryProtocol.Deserialize<ErrorMessage>(errorPayload);
+            Eq("ERR 带上请求的 reqId（发起方能对上号）", "req-1", error?.ReqId ?? "");
+            Eq("ERR 错误码为 unsupported", RegistryErrorCodes.Unsupported, error?.Code ?? "");
+        }
+
+        // ---- 老格式 TCP 探测 ----
+        using (var tcp = new TcpClient())
+        {
+            await tcp.ConnectAsync(IPAddress.Loopback, port);
+            var stream = tcp.GetStream();
+            await stream.WriteAsync(legacyV1);
+            var reply = await ReadFrameAsync(stream, 3000);
+
+            Check("老格式 TCP 探测仍逐字节原样回显",
+                reply.AsSpan().SequenceEqual(legacyV1), Encoding.UTF8.GetString(reply));
+        }
+
+        server.Dispose();
+
+        // ---- 老配置：没有 Registrar 段 → 不产生任何注册行为 ----
+        var root = Path.Combine(AppContext.BaseDirectory, ".testtmp", "legacy_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        var previousOverride = ConfigManager.OverridePath;
+        ConfigManager.OverridePath = Path.Combine(root, "appsettings.json");
+
+        var listenPort = FindBindablePort();
+        ConfigManager.Save(new AppConfig
+        {
+            ListenPort = listenPort,
+            IntervalMs = 500,
+            TimeoutMs = 500,
+            Links = { new LinkConfig { Name = "本机", Host = "127.0.0.1", Port = port } }
+        });
+
+        RunOnSta(() =>
+        {
+            var window = new MainWindow();
+
+            InvokePrivateHandler(window, "Start_Click");
+            Pump(400);
+
+            Check("老配置启动后不创建注册客户端", GetPrivateField(window, "_registryClient") is null);
+            Check("老配置启动后没有中心服务", GetPrivateField(window, "_registryCenter") is null);
+            Check("服务端照常起来（探测不受影响）", GetPrivateField(window, "_server") is not null);
+
+            var note = ((TextBlock)window.FindName("StatusNote")!).Text;
+            Check("状态栏不出现注册相关提示（与升级前一致）", !note.Contains("注册"), note);
+
+            Check("不会凭空空生成中心清单文件", !File.Exists(Path.Combine(root, "registry.json")));
+
+            InvokePrivateHandler(window, "Stop_Click");
+            window.Close();
+        }, "老配置兼容断言");
+
+        ConfigManager.OverridePath = previousOverride;
+        try { Directory.Delete(root, true); } catch { }
+    }
+
+    /// <summary>按换行读一帧（探测回显以 <c>\n</c> 结尾）。</summary>
+    private static async Task<byte[]> ReadFrameAsync(NetworkStream stream, int timeoutMs)
+    {
+        var buffer = new List<byte>(64);
+        var one = new byte[1];
+
+        using var cts = new CancellationTokenSource(timeoutMs);
+        try
+        {
+            while (buffer.Count < 4096)
+            {
+                var read = await stream.ReadAsync(one.AsMemory(0, 1), cts.Token);
+                if (read == 0) break;
+
+                buffer.Add(one[0]);
+                if (one[0] == (byte)'\n') break;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // 超时：把已读到的部分返回，由断言判定失败
+        }
+
+        return buffer.ToArray();
     }
 
     // ---------------- STA 辅助 ----------------

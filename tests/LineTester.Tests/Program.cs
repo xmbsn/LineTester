@@ -36,29 +36,40 @@ internal static partial class Program
         Console.WriteLine("LineTester 自检");
         Console.WriteLine(new string('=', 64));
 
-        TestPercentile();
-        TestStatusRules();
-        TestStatSession();
-        TestConfigManager();
-        await TestCsvLogWriterAsync();
-        TestFailureKinds();
-        TestLinkRowValidation();
-        TestRegistryProtocol();
-        TestRegistryAuth();
-        TestRegistryChunking();
-        TestRegistryAddressRules();
-        TestRegistryStore();
-        TestRegistrySync();
-        TestRegistryCenter();
-        await TestRegistryEndToEndAsync();
-        await TestRegistryNonCenterAsync();
-        TestRegistrarDraft();
-        TestRegistryUiText();
-        TestRegistryNodeRow();
-        TestRegistryPanelUi();
-        TestRegistryMainWindowUi();
-        await TestProbesAsync();
-        TestMainWindowClear();
+        try
+        {
+            TestPercentile();
+            TestStatusRules();
+            TestStatSession();
+            TestConfigManager();
+            await TestCsvLogWriterAsync();
+            TestFailureKinds();
+            TestLinkRowValidation();
+            TestRegistryProtocol();
+            TestRegistryAuth();
+            TestRegistryChunking();
+            TestRegistryAddressRules();
+            TestRegistryStore();
+            TestRegistrySync();
+            TestRegistryCenter();
+            await TestRegistryEndToEndAsync();
+            await TestRegistryNonCenterAsync();
+            TestRegistrarDraft();
+            TestRegistryUiText();
+            TestRegistryNodeRow();
+            TestRegistryPanelUi();
+            TestRegistryMainWindowUi();
+            await TestRegistryCompatMatrixAsync();
+            TestRepoTemplateLoads();
+            await TestProbesAsync();
+            TestMainWindowClear();
+        }
+        catch (Exception ex)
+        {
+            // 自检宿主自己的异常（端口耗尽、断言辅助写错等）也要以"失败"收场：
+            // 否则进程以未处理异常退出，输出被截断，看不到到底跑到哪一步
+            Check("自检执行过程中未抛出异常", false, ex.ToString());
+        }
 
         Console.WriteLine(new string('=', 64));
         Console.WriteLine($"通过 {_pass}，失败 {Failures.Count}");
@@ -1640,6 +1651,10 @@ internal static partial class Program
     /// <summary>
     /// 找一个真正可绑定的端口：系统临时端口可能落在保留/排除区间，
     /// 直接用它绑定会得到 AccessDenied。这里按 ProbeServer 的双栈策略实测一次再交付。
+    ///
+    /// 注意：Windows **按顺序**分配临时端口，一旦游标落进一段排除区间（Hyper-V/WSL 常占大段），
+    /// 连着几十个候选会一起失败——所以临时端口试完必须退回**随机扫描**一段高端口
+    /// （只试临时端口时实测偶发"找不到可绑定的端口"而整轮自检崩掉）。
     /// </summary>
     private static int FindBindablePort()
     {
@@ -1649,7 +1664,14 @@ internal static partial class Program
             if (CanBind(candidate)) return candidate;
         }
 
-        throw new InvalidOperationException("找不到可绑定的端口");
+        var random = new Random(unchecked(Environment.TickCount ^ (int)DateTime.UtcNow.Ticks));
+        for (var attempt = 0; attempt < 300; attempt++)
+        {
+            var candidate = random.Next(20000, 60000);
+            if (CanBind(candidate)) return candidate;
+        }
+
+        throw new InvalidOperationException("找不到可绑定的端口（50 个临时端口 + 300 个随机端口都不可用）");
     }
 
     private static bool CanBind(int port)
