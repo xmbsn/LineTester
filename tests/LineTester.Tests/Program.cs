@@ -61,6 +61,7 @@ internal static partial class Program
             TestIpv4Box();
             TestRegistryPanelUi();
             TestRegistryMainWindowUi();
+            TestNodeNameHeader();
             TestLinkToggleWhileRunning();
             await TestRegistryCompatMatrixAsync();
             TestRepoTemplateLoads();
@@ -1295,6 +1296,16 @@ internal static partial class Program
             ListenPort = listenPort,
             IntervalMs = 300,
             TimeoutMs = 500,
+            Registrar = new RegistrarConfig
+            {
+                Enabled = true,
+                NodeName = "机房A-测试端",
+                NodeId = "render-node",
+                PublicHost = "203.0.113.9",
+                PublicPort = 16298,
+                CenterHost = "203.0.113.1",
+                CenterPort = 16298
+            },
             Links =
             {
                 new LinkConfig { Name = "机房B", Host = "127.0.0.1", Port = echoPort },

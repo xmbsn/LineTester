@@ -1489,6 +1489,69 @@ internal static partial class Program
         }, "IPv4 控件断言");
     }
 
+    // ---------------- 顶部大号节点名 ----------------
+
+    /// <summary>
+    /// 本机节点名称大号显示在界面顶部：同机开多个实例时一眼认出"这台是哪台"。
+    /// 这里锁住三件事：字号足够大、正在编辑的名字立刻跟随、没填时给提示而不是拿机器名冒充。
+    /// </summary>
+    private static void TestNodeNameHeader()
+    {
+        Section("顶部大号节点名：取值来源 / 编辑实时跟随 / 未填写提示");
+
+        var root = Path.Combine(AppContext.BaseDirectory, ".testtmp", "nodename_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        var previousOverride = ConfigManager.OverridePath;
+        ConfigManager.OverridePath = Path.Combine(root, "appsettings.json");
+
+        ConfigManager.Save(new AppConfig
+        {
+            ListenPort = 8800,
+            Links = { new LinkConfig { Name = "本机", Host = "127.0.0.1", Port = 9001 } },
+            Registrar = new RegistrarConfig { Enabled = true, NodeName = "机房A", NodeId = "self-node", PublicHost = "203.0.113.9", PublicPort = 8800, CenterHost = "203.0.113.1", CenterPort = 16298 }
+        });
+
+        RunOnSta(() =>
+        {
+            var window = new MainWindow();
+            var header = window.FindName("NodeNameText") as TextBlock;
+            var note = window.FindName("NodeNameNote") as TextBlock;
+
+            Check("窗口顶部有节点名显示控件", header is not null);
+            Check("节点名是大号显示（≥20px）", header!.FontSize >= 20, header.FontSize.ToString());
+            Check("节点名加粗", header.FontWeight == FontWeights.Bold);
+            Eq("节点名取值来自配置", "机房A", header.Text);
+            Eq("有名字时不显示提示", Visibility.Collapsed, note!.Visibility);
+            Check("窗口标题也带节点名（任务栏能区分多个实例）",
+                window.Title.Contains("机房A"), window.Title);
+
+            // 在注册中心页改名字 → 顶部立刻跟随（不必等保存/启动）
+            var panel = (RegistryPanel)window.FindName("RegistryTabPanel")!;
+            ((TextBox)panel.FindName("NodeNameBox")!).Text = "机房A-改";
+            Eq("编辑节点名后顶部立刻跟随", "机房A-改", header.Text);
+            Check("窗口标题同步跟随", window.Title.Contains("机房A-改"), window.Title);
+
+            // 清空 → 提示该去哪儿填，且不用机器名冒充
+            ((TextBox)panel.FindName("NodeNameBox")!).Text = "   ";
+            Eq("清空后显示未命名", "未命名节点", header.Text);
+            Eq("未命名时给出填写提示", Visibility.Visible, note.Visibility);
+            Check("未命名时窗口标题不拼接空名字", window.Title == "机房线路稳定性测试工具", window.Title);
+            Check("未命名时用灰色弱化显示", (header.Foreground as SolidColorBrush)?.Color == Color.FromRgb(0x9A, 0xA0, 0xA6),
+                (header.Foreground as SolidColorBrush)?.Color.ToString() ?? "null");
+
+            ((TextBox)panel.FindName("NodeNameBox")!).Text = "机房B";
+            Eq("重新填写后恢复大号加粗", "机房B", header.Text);
+            Check("恢复后重新加粗", header.FontWeight == FontWeights.Bold);
+            Eq("恢复后提示收起", Visibility.Collapsed, note.Visibility);
+
+            window.Close();
+        }, "顶部节点名断言");
+
+        ConfigManager.OverridePath = previousOverride;
+        try { Directory.Delete(root, true); } catch { }
+    }
+
     // ---------------- 兼容矩阵逐行验证 ----------------
 
     /// <summary>

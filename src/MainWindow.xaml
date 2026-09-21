@@ -172,6 +172,7 @@
 
     <Grid Margin="14">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>   <!-- 本机节点名称（大号） -->
             <RowDefinition Height="Auto"/>   <!-- 参数 -->
             <RowDefinition Height="Auto"/>   <!-- 操作 -->
             <RowDefinition Height="Auto"/>   <!-- 状态 -->
@@ -179,8 +180,31 @@
             <RowDefinition Height="Auto"/>   <!-- 说明 -->
         </Grid.RowDefinitions>
 
+        <!-- ===== 本机节点名称（大号）：同机开多个实例时一眼认出这台是哪台 ===== -->
+        <Border Grid.Row="0" Style="{StaticResource Card}" Padding="14,8">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <TextBlock Grid.Column="0" Style="{StaticResource FieldLabel}" Text="本机节点"
+                           Margin="0,0,10,0" FontSize="14" Foreground="#5F6368"/>
+
+                <TextBlock Grid.Column="1" x:Name="NodeNameText" Text="未命名节点"
+                           FontSize="22" FontWeight="Bold" Foreground="#9AA0A6"
+                           VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                           ToolTip="本机节点名称：在「注册中心」页填写“节点名称”后显示在这里（也是其他节点上自动生成的链路名）"/>
+
+                <TextBlock Grid.Column="2" x:Name="NodeNameNote" Margin="12,0,0,2"
+                           Foreground="#5F6368" VerticalAlignment="Bottom"
+                           Text="在「注册中心」页填写“节点名称”后显示在这里"/>
+            </Grid>
+        </Border>
+
         <!-- ===== 运行参数 ===== -->
-        <Border Grid.Row="0" Style="{StaticResource Card}">
+        <Border Grid.Row="1" Style="{StaticResource Card}">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
@@ -248,7 +272,7 @@
         </Border>
 
         <!-- ===== 操作按钮 ===== -->
-        <Grid Grid.Row="1" Margin="0,10,0,0">
+        <Grid Grid.Row="2" Margin="0,10,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
@@ -274,7 +298,7 @@
         </Grid>
 
         <!-- ===== 状态 ===== -->
-        <Border Grid.Row="2" Style="{StaticResource Card}" Padding="14,10" Margin="0,10,0,0">
+        <Border Grid.Row="3" Style="{StaticResource Card}" Padding="14,10" Margin="0,10,0,0">
             <StackPanel>
                 <Grid>
                     <Grid.ColumnDefinitions>
@@ -301,7 +325,7 @@
         </Border>
 
         <!-- ===== 数据表格 ===== -->
-        <TabControl Grid.Row="3" x:Name="MainTabs" Margin="0,10,0,0" Background="Transparent" BorderThickness="0">
+        <TabControl Grid.Row="4" x:Name="MainTabs" Margin="0,10,0,0" Background="Transparent" BorderThickness="0">
             <TabItem Header="链路实时统计">
                 <DataGrid x:Name="StatsGrid" Margin="0,6,0,0">
                     <DataGrid.Columns>
@@ -466,7 +490,7 @@
         </TabControl>
 
         <!-- ===== 说明（默认折叠，把纵向空间让给表格） ===== -->
-        <Expander Grid.Row="4" Header="说明 / 配置文件 / 指标口径" Margin="0,10,0,0"
+        <Expander Grid.Row="5" Header="说明 / 配置文件 / 指标口径" Margin="0,10,0,0"
                   Padding="0" IsExpanded="False" Foreground="#3C4043">
             <Border Style="{StaticResource Card}" Margin="0,6,0,0">
                 <TextBlock Margin="2" TextWrapping="Wrap" Foreground="#3C4043" LineHeight="20">

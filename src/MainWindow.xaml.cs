@@ -19,6 +19,18 @@ public partial class MainWindow : Window
 {
     private const int MaxAnomalies = 1000;
     private const int MaxTrendRows = 2000;
+    private const string BaseTitle = "机房线路稳定性测试工具";
+
+    // 冻结过的静态画刷：跨线程（自检里每个界面用例一个新 STA 线程）安全
+    private static readonly Brush NodeNameBrush = Frozen(0x20, 0x21, 0x24);
+    private static readonly Brush NodeNameMutedBrush = Frozen(0x9A, 0xA0, 0xA6);
+
+    private static SolidColorBrush Frozen(byte r, byte g, byte b)
+    {
+        var brush = new SolidColorBrush(Color.FromRgb(r, g, b));
+        brush.Freeze();
+        return brush;
+    }
 
     private readonly ProbeClient _client = new();
     private readonly StatSession _session = new();
@@ -107,6 +119,7 @@ public partial class MainWindow : Window
         RegistryTabPanel.SaveRequested += () => SaveConfig_Click(this, new RoutedEventArgs());
         RegistryTabPanel.RegisterRequested += OnRegistryRegisterRequested;
         RegistryTabPanel.CenterChanged += OnRegistryCenterChanged;
+        RegistryTabPanel.NodeNameChanged += UpdateNodeNameDisplay;
 
         _uiTimer.Tick += OnUiTick;
         _uiTimer.Start();
@@ -159,7 +172,41 @@ public partial class MainWindow : Window
         RegistryTabPanel.Load(cfg.Registrar);
 
         LoadLinkRows(cfg.Links);
+        UpdateNodeNameDisplay();
         RefreshRegistryUi();
+    }
+
+    /// <summary>
+    /// 顶部大号显示本机节点名称：同一台机器/同一机房开多个实例时，靠它一眼认出这台是哪台。
+    ///
+    /// 取值以「注册中心」页的输入框为准（它在加载/保存时与配置同步，因此永远反映当前值）：
+    /// 刚敲进去就显示、清空就显示"未命名"——若这里再回退到配置里的旧值，
+    /// 用户清空后顶部还挂着旧名字，反而像是清不掉。
+    /// 没填时给出去哪儿填的提示，不用机器名冒充（那会让人以为节点名已经配好了）。
+    /// </summary>
+    private void UpdateNodeNameDisplay()
+    {
+        if (NodeNameText is null) return;
+
+        var name = RegistryTabPanel is not null
+            ? RegistryTabPanel.NodeName
+            : _settings.Registrar.NodeName?.Trim() ?? "";
+
+        if (name.Length == 0)
+        {
+            NodeNameText.Text = "未命名节点";
+            NodeNameText.Foreground = NodeNameMutedBrush;
+            NodeNameText.FontWeight = FontWeights.Normal;
+            NodeNameNote.Visibility = Visibility.Visible;
+            Title = BaseTitle;
+            return;
+        }
+
+        NodeNameText.Text = name;
+        NodeNameText.Foreground = NodeNameBrush;
+        NodeNameText.FontWeight = FontWeights.Bold;
+        NodeNameNote.Visibility = Visibility.Collapsed;
+        Title = BaseTitle + " — " + name;
     }
 
     // ---------------- 链路编辑器 ----------------
@@ -1055,6 +1102,7 @@ public partial class MainWindow : Window
         DrainPendingResults();
         ApplyLiveLinksIfDue();
         RefreshStats();
+        UpdateNodeNameDisplay();
         RefreshRegistryUi();
         RefreshStatusBar();
     }

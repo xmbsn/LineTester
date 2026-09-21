@@ -49,6 +49,7 @@ public partial class RegistryPanel : UserControl
         SecretTextBox.TextChanged += (_, _) => SyncSecret(fromPasswordBox: false);
         ShowSecretCheck.Checked += (_, _) => ApplySecretVisibility();
         ShowSecretCheck.Unchecked += (_, _) => ApplySecretVisibility();
+        NodeNameBox.TextChanged += (_, _) => NodeNameChanged?.Invoke();
 
         // 所有数字框一律只收半角数字：现场曾把 IP 敲进端口框，得到的报错看不懂
         RestrictToDigits(PublicPortBox, 5);
@@ -64,6 +65,12 @@ public partial class RegistryPanel : UserControl
 
     /// <summary>点「立即注册 / 立即同步」。</summary>
     public event Action? RegisterRequested;
+
+    /// <summary>节点名称在输入框里被改动（顶部大号显示实时跟随，不必等保存）。</summary>
+    public event Action? NodeNameChanged;
+
+    /// <summary>界面上当前的节点名称（未填写时为空串）。</summary>
+    public string NodeName => NodeNameBox.Text.Trim();
 
     /// <summary>中心清单被本页改动（移除 / 恢复 / 分发勾选）→ 主窗口刷新状态栏与链路页。</summary>
     public event Action? CenterChanged;

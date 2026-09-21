@@ -7,7 +7,7 @@
 > 链路编辑器（含防误删）、界面重排、报文带对端源地址、失败原因分类、日志按天滚动 → 上传 GitHub（private）；
 > ② **链路注册协议 v1（多机房自动互测）** 全流程落地：规格 → 计划 → 三个切片（端口分流与中心服务、
 > 客户端同步循环与三节点端到端、注册设置页与中心节点管理 + 链路页联动），规格 §12 兼容矩阵逐行验证。
-> 自检从 **0 → 837 项断言**，全程 `0 警告 0 错误`。
+> 自检从 **0 → 853 项断言**，全程 `0 警告 0 错误`。
 
 ---
 
@@ -15,7 +15,7 @@
 
 > 读取 `E:\dsh\LineTester\LineTester.md`（本文件）与 `README.md`，然后：
 > ① `dotnet build .\LineTester.sln -c Release` 确认可编译（应为 0 警告 0 错误）；
-> ② `dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release` 跑自检（应 837/837 通过）；
+> ② `dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release` 跑自检（应 853/853 通过）；
 > ③ 改任何代码前先看本文件 **§4 关键设计约定** 与 **§5 本机环境坑**（这两节能避免重复踩坑）；
 > ④ 改注册协议/注册页前**先读 `docs/REGISTRY-PROTOCOL.md`**（协议契约的 SSOT，实现期修正已回写）。
 > 注意：**测试工程不在 .sln 里**（本机 SDK 损坏，见 §5.2），必须按路径构建/运行。
@@ -58,7 +58,7 @@
 | `src/Views/RegistryPanel.xaml(.cs)` | 「注册中心」标签页（本节点/注册中心/状态/中心管理四区） |
 | `src/Views/RegistryNodeRow.cs` | 中心节点表的一行（分发勾选写中心侧 `centerHidden`）——**不引用 WPF** |
 | `src/Views/Ipv4Box.xaml(.cs)` | 标准 IPv4 输入控件（四段式、只收数字、自动跳段、越界标红、可切主机名） |
-| `tests/LineTester.Tests/Program*.cs` | 零依赖自检宿主（837 项断言，含真实回环网络、真实窗口端到端、注册协议与注册页） |
+| `tests/LineTester.Tests/Program*.cs` | 零依赖自检宿主（853 项断言，含真实回环网络、真实窗口端到端、注册协议与注册页） |
 
 ---
 
@@ -175,6 +175,9 @@ dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release
 - 表格统一在 `Window.Resources` 里的隐式 `DataGrid`/`DataGridColumnHeader`/`DataGridRow` 样式；**隔行底纹用行样式触发器**实现（用 `AlternatingRowBackground` 会盖掉"非法行标红"）；链路页的行样式里"注册链路配色"触发器必须放在"非法标红"**之前**（后面的赢）。
 - 按钮样式：`BaseButton`（键控）+ **隐式 `Style TargetType="Button"`** + `PrimaryButton`。曾经因为只定义了键控样式，导致除主按钮外全部退回 WPF 默认外观。
 - 状态栏四段：`StatusDot` / `StatusText` / `StatusParams` / `StatusSamples` + 独立的 `StatusNote`（测试/日志出错变红，注册告警变橙）。
+- **顶部有一条大号节点名**（`NodeNameText`，22px 加粗，窗口标题也带它）：取值以「注册中心」页输入框为准——
+  刚敲就显示、清空就显示"未命名节点"并提示去哪儿填。**不要在没值时回退到配置里的旧值**，
+  否则用户清空后顶部还挂着旧名字，看起来像清不掉（这条被断言抓过）。也不用机器名冒充。
 - 链路改动是**配置类**变更，但**运行中即时生效**：协议勾选（TCP/UDP）立刻作用到运行中的探测循环，
   主机/端口/名称改动约 1 秒防抖后生效（防抖是为了不在"端口输到一半"时发包）。
   曾经的口径是"点启动测试后生效"，结果现场出现"界面写着不发包、包却照发"，统计跟着失真。
@@ -277,7 +280,7 @@ git -c http.sslBackend=openssl -c http.proxy=http://127.0.0.1:17895 -c https.pro
 ## 8. 本次会话的验证证据
 
 - `dotnet build .\LineTester.sln -c Release` → **0 警告 0 错误**（每次改动后均重跑）
-- 自检 **837/837 通过**；T14 后 8 次连跑全绿，收尾阶段每改一轮都重跑
+- 自检 **853/853 通过**；收尾阶段每改一轮都重跑，现场反馈修复后 8 次、顶部节点名后 3 次连跑全绿
 - 现场反馈的三件事都有实测断言（不是靠肉眼看界面）：
   ① 运行中取消勾选 TCP → 用"能数包的纯回显服务端"确认对端**不再收到新的 TCP**，而 UDP 照常；
   ② "发 TCP 却显示 UDP" → 用"只开 TCP / 只开 UDP"两段实测：只开 TCP 时明细里全是 TCP 行、
