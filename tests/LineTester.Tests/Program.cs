@@ -33,6 +33,12 @@ internal static partial class Program
             return Failures.Count == 0 ? 0 : 1;
         }
 
+        // 用真接口跑一次运营商查询（人工排查用：确认这台机器能不能访问 ip-api）
+        if (args.Length >= 2 && args[0] == "--isp-live")
+        {
+            return await IspLiveAsync(args.Skip(1).ToArray());
+        }
+
         Console.WriteLine("LineTester 自检");
         Console.WriteLine(new string('=', 64));
 

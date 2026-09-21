@@ -364,11 +364,30 @@ internal static partial class Program
                 var window = new MainWindow();
 
                 var statsGrid = (DataGrid)window.FindName("StatsGrid")!;
-                Check("统计表新增「本端运营商」列", statsGrid.Columns.Any(c => Equals(c.Header, "本端运营商")));
                 Check("统计表新增「目标运营商」列", statsGrid.Columns.Any(c => Equals(c.Header, "目标运营商")));
-                Check("统计表新增「跨网」列", statsGrid.Columns.Any(c => Equals(c.Header, "跨网")));
+                Check("统计表新增「跨网（是否跨运营商）」列",
+                    statsGrid.Columns.Any(c => Equals(c.Header, "跨网（是否跨运营商）")));
+                Check("统计表新增「本端出口（运营商）」列",
+                    statsGrid.Columns.Any(c => Equals(c.Header, "本端出口（运营商）")));
                 Check("运营商开关默认勾选（可按需关闭）",
                     window.FindName("IspCheck") is CheckBox { IsChecked: true });
+
+                // 现场反馈"运营商信息没有显示"的根因：列太多、窗口放不下，新列被挤到可视区之外。
+                // 因此固定要求：运营商相关列必须排在前几列，且"这些列 + 前两列"要能在默认窗口宽度内看全。
+                var headers = statsGrid.Columns.Select(c => c.Header?.ToString() ?? "").ToList();
+                Check("「目标」仍是第 2 列", headers.Count > 1 && headers[1] == "目标", string.Join("|", headers.Take(6)));
+                Check("「目标运营商」排在第 3 列（保证不用横向滚动就能看到）",
+                    headers.Count > 2 && headers[2] == "目标运营商", string.Join("|", headers.Take(6)));
+                Check("「跨网」排在前 4 列",
+                    headers.Count > 3 && headers[3] == "跨网（是否跨运营商）", string.Join("|", headers.Take(6)));
+                Check("「本端出口（运营商）」排在前 5 列",
+                    headers.Count > 4 && headers[4] == "本端出口（运营商）", string.Join("|", headers.Take(6)));
+
+                var leadingWidth = statsGrid.Columns.Take(5).Sum(c => c.Width.DisplayValue);
+                Check("前 5 列（含全部运营商信息）能在默认窗口宽度内看全",
+                    leadingWidth <= 1360 - 40, $"前 5 列共 {leadingWidth:F0}px，窗口可用约 1320px");
+
+                Check("统计表下方有一行运营商查询状态说明", window.FindName("IspNote") is TextBlock);
 
                 InvokePrivateHandler(window, "Start_Click");
 
@@ -392,6 +411,12 @@ internal static partial class Program
                         row.LocalCarrier);
                     Check("目标运营商来自查询结果", row.RemoteCarrier == "联通", row.RemoteCarrier);
                     Check("本端不可判定 → 灰灯（不误报跨运营商）", row.CrossNetState == "unknown", row.CrossNetState);
+                    Check("「本端出口（运营商）」把地址与运营商放在一格",
+                        row.LocalExitText.Contains(" · ") && row.LocalExitText.Contains(row.LocalCarrier),
+                        row.LocalExitText);
+                    Check("查询状态行有内容（能回答为什么没显示）",
+                        ((TextBlock)window.FindName("IspNote")!).Text.Contains("运营商信息："),
+                        ((TextBlock)window.FindName("IspNote")!).Text);
                 }
 
                 // 直接验表行的显示取值（不依赖真实公网出口）：电信 ↔ 联通 = 红灯
@@ -406,10 +431,24 @@ internal static partial class Program
                 sameRow.SetCarrier(Sample.TelecomShanghai, Sample.TelecomShanghai, enabled: true);
                 Eq("绿灯：同运营商", "same", sameRow.CrossNetState);
 
-                var unknownRow = new StatRow { Key = "k3", Name = "机房D / TCP", Target = "10.0.0.9:9000" };
+                var unknownRow = new StatRow { Key = "k3", Name = "机房D / TCP", Target = "10.0.0.9:9000", SeenFrom = "-" };
                 unknownRow.SetCarrier(Sample.TelecomShanghai, null, enabled: true);
                 Eq("灰灯：数据不足", "unknown", unknownRow.CrossNetState);
                 Eq("查不到时目标列显示查询中", "查询中…", unknownRow.RemoteCarrier);
+
+                // 网络不通时不能一直写"查询中…"，要写明是"查询失败"/"被限流"
+                var failedRow = new StatRow { Key = "k3b", Name = "机房D / TCP", Target = "221.5.88.88:9000" };
+                failedRow.SetCarrier(null, null, enabled: true, pendingText: "查询失败");
+                Eq("查询失败时目标列写明失败", "查询失败", failedRow.RemoteCarrier);
+                failedRow.SetCarrier(null, null, enabled: true, pendingText: "被限流…");
+                Eq("被限流时目标列写明限流", "被限流…", failedRow.RemoteCarrier);
+                Eq("本端出口列同样写出原因", "- · 被限流…", failedRow.LocalExitText);
+
+                // 目标是内网地址：本地判定，不发请求，显示"内网地址"而不是一直"查询中…"
+                var privateRow = new StatRow { Key = "k3c", Name = "机房F / TCP", Target = "192.168.9.9:9000", SeenFrom = "-" };
+                privateRow.SetCarrier(Sample.Private, Sample.Private, enabled: true);
+                Eq("内网目标显示内网地址", "内网地址", privateRow.RemoteCarrier);
+                Eq("两侧都内网 → 不判定", "unknown", privateRow.CrossNetState);
 
                 var offRow = new StatRow { Key = "k4", Name = "机房E / TCP", Target = "202.96.209.133:9000" };
                 offRow.SetCarrier(null, null, enabled: false);
@@ -437,6 +476,43 @@ internal static partial class Program
             echoServer.Dispose();
             try { Directory.Delete(root, true); } catch { }
         }
+    }
+
+    /// <summary>
+    /// 人工排查用：用**真实** ip-api 跑一次查询，打印结果。
+    /// 用途是回答"这台机器到底能不能查运营商"——自检本身不联网，所以这个入口单独放出来。
+    /// 用法：<c>LineTester.Tests.exe --isp-live 221.5.88.88 202.96.209.133</c>
+    /// </summary>
+    private static async Task<int> IspLiveAsync(string[] ips)
+    {
+        Console.WriteLine("运营商查询实测（真实 ip-api）：" + string.Join(", ", ips));
+        Console.WriteLine(new string('-', 64));
+
+        using var fetcher = new IspApiFetcher("http://ip-api.com/batch", 8000);
+        var result = await fetcher.FetchAsync(ips, CancellationToken.None);
+
+        Console.WriteLine($"请求成功：{result.Ok}；剩余额度 X-Rl={result.Remaining}；重置 X-Ttl={result.ResetAfterSeconds}s");
+
+        if (!result.Ok)
+        {
+            Console.WriteLine("失败原因：" + result.Error);
+            Console.WriteLine("→ 说明这台机器访问不了 ip-api（防火墙/代理/无外网）。");
+            Console.WriteLine("  界面表现：跨网列显示「查询失败」，状态栏也会提示。关掉开关即可停止联网查询。");
+            return 1;
+        }
+
+        foreach (var record in result.Records)
+        {
+            IspCarrier.Classify(record, out var name);
+            Console.WriteLine($"{record.Ip,-18} {name,-14} isp={record.Isp}");
+            Console.WriteLine($"{"",-18} as={record.As} asname={record.AsName} 国别={record.Country} 状态={record.Status}/{record.Message}");
+        }
+
+        var verdict = IspCarrier.Compare(result.Records.ElementAtOrDefault(0), result.Records.ElementAtOrDefault(1));
+        Console.WriteLine(new string('-', 64));
+        Console.WriteLine($"跨网判定（前两个地址）：{verdict.State} / {verdict.Short}");
+        Console.WriteLine(verdict.Detail);
+        return 0;
     }
 
     /// <summary>假抓取器：记录收到的批量请求，按需返回预设结果。</summary>

@@ -1110,7 +1110,21 @@ public partial class MainWindow : Window
             };
         }
 
-        row.SetCarrier(localRecord, _isp!.TryGet(remote), enabled: true);
+        row.SetCarrier(localRecord, _isp!.TryGet(remote), enabled: true, PendingText());
+    }
+
+    /// <summary>
+    /// "还没查到"时该显示什么：区分"正在查 / 查不通 / 被限流"，否则网络不通时
+    /// 那一列会一直写着"查询中…"，用户根本看不出是卡住了还是查不到。
+    /// </summary>
+    private string PendingText()
+    {
+        var status = _isp?.Status;
+        if (status is null) return "查询中…";
+        if (status.Throttled) return "被限流…";
+        if (status.LastError is not null) return "查询失败";
+
+        return "查询中…";
     }
 
     // ---------------- 探测循环 ----------------
@@ -1428,6 +1442,7 @@ public partial class MainWindow : Window
 
         StatusNote.Text = note ?? "";
         StatusNote.Visibility = string.IsNullOrEmpty(note) ? Visibility.Collapsed : Visibility.Visible;
+        RefreshIspNote();
         StatusNote.Foreground = new SolidColorBrush(_statusIsError
             ? Color.FromRgb(0xC5, 0x22, 0x1F)
             : registry?.Warning == true || ispWarning
@@ -1435,6 +1450,45 @@ public partial class MainWindow : Window
                 : Color.FromRgb(0x5F, 0x63, 0x68));
 
         UpdateLinkSummary();
+    }
+
+    /// <summary>
+    /// 统计表下方那一行"运营商查询状态"：直接回答"为什么这里没显示运营商"。
+    /// 现场最常见的三种原因（没勾选 / 目标是内网 / 查询不通）都在这里写明。
+    /// </summary>
+    private void RefreshIspNote()
+    {
+        if (IspNote is null) return;
+
+        var status = _isp?.Status;
+
+        if (IspCheck.IsChecked != true || status is null)
+        {
+            IspNote.Text = "运营商信息：未启用（勾选上方「显示运营商信息并判断是否跨运营商」后开始查询）";
+            IspNote.Visibility = Visibility.Visible;
+            return;
+        }
+
+        var parts = new List<string> { $"运营商信息：已缓存 {status.Cached} 个地址" };
+
+        if (status.Throttled)
+            parts.Add($"被 ip-api 限流，{(int)Math.Max(0, (status.ThrottledUntilUtc!.Value - DateTime.UtcNow).TotalSeconds)} 秒后重试");
+        else if (status.LastError is not null)
+            parts.Add($"最近失败：{status.LastError}");
+
+        if (status.Pending > 0) parts.Add($"{status.Pending} 个地址待查询");
+
+        var privateTargets = _statRows.Values.Count(r => IspAddressRules.HostPart(r.Target) is { Length: > 0 } h && !IspAddressRules.IsPublicIp(h));
+        if (privateTargets > 0)
+            parts.Add($"{privateTargets} 条链路的目标是内网地址（内网没有运营商信息，显示为「内网地址」）");
+
+        var noEcho = _statRows.Values.Count(r => IspAddressRules.HostPart(r.SeenFrom).Length == 0);
+        if (noEcho > 0 && status.Cached == 0)
+            parts.Add("本端出口 IP 要等首次探测成功后才拿得到");
+
+        parts.Add("关掉开关即停止联网查询");
+        IspNote.Text = string.Join(" · ", parts);
+        IspNote.Visibility = Visibility.Visible;
     }
 
     private void OnLogError(string message)

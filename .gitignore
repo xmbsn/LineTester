@@ -4,6 +4,7 @@ obj/
 
 # 发布产物（自包含单文件 EXE 约 160MB，不进版本库）
 publish/
+publish-next/
 
 # 运行期数据
 logs/

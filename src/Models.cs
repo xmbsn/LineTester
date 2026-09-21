@@ -479,9 +479,16 @@ public sealed class StatRow : INotifyPropertyChanged
     private string _crossNetText = "";
     private string _crossNetState = "unknown";
     private string _carrierDetail = "";
+    private string _localExitText = "-";
 
     /// <summary>本端出口 IP 的运营商（如"电信"）。</summary>
     public string LocalCarrier { get => _localCarrier; set => Set(ref _localCarrier, value); }
+
+    /// <summary>
+    /// 「本端出口（运营商）」一列：把"对端看到的本端源地址"与它的运营商放在同一格里
+    /// （两者是一回事，分两列既占宽度、又容易让人对不上号）。
+    /// </summary>
+    public string LocalExitText { get => _localExitText; set => Set(ref _localExitText, value); }
 
     /// <summary>目标地址的运营商（如"联通"、"阿里云"）。</summary>
     public string RemoteCarrier { get => _remoteCarrier; set => Set(ref _remoteCarrier, value); }
@@ -512,14 +519,17 @@ public sealed class StatRow : INotifyPropertyChanged
 
     /// <summary>
     /// 写入运营商信息。逻辑放在这里（而不是界面里）是为了能被零依赖自检直接断言：
-    /// 传 null 表示"还没查到"，此时显示"查询中…"而不是假装未知。
+    /// 传 null 表示"还没查到"，此时显示 <paramref name="pendingText"/>——
+    /// 由调用方根据查询状态给出"查询中…/查询失败/被限流/未启用"，
+    /// 否则网络不通时这一列会永远写着"查询中…"，让人以为程序在等（实际是查不到）。
     /// </summary>
-    public void SetCarrier(Isp.IspRecord? local, Isp.IspRecord? remote, bool enabled)
+    public void SetCarrier(Isp.IspRecord? local, Isp.IspRecord? remote, bool enabled, string pendingText = "查询中…")
     {
         if (!enabled)
         {
             LocalCarrier = "未启用";
             RemoteCarrier = "未启用";
+            LocalExitText = SeenFrom == "-" ? "-" : SeenFrom + " · 未启用";
             CrossNetState = "disabled";
             CrossNetText = "未启用查询";
             CarrierDetail = "「显示运营商信息」未勾选：程序不会把 IP 发给 ip-api。";
@@ -528,8 +538,12 @@ public sealed class StatRow : INotifyPropertyChanged
 
         var verdict = Isp.IspCarrier.Compare(local, remote);
 
-        LocalCarrier = local is null ? "查询中…" : NameOf(local);
-        RemoteCarrier = remote is null ? "查询中…" : NameOf(remote);
+        LocalCarrier = local is null ? pendingText : NameOf(local);
+        RemoteCarrier = remote is null ? pendingText : NameOf(remote);
+
+        // SeenFrom 可能是 ""（还没探测过）或 "-"（占位），两种都按"没有地址"显示
+        var exit = string.IsNullOrWhiteSpace(SeenFrom) || SeenFrom == "-" ? "-" : SeenFrom;
+        LocalExitText = exit + " · " + LocalCarrier;
 
         CrossNetState = verdict.State switch
         {

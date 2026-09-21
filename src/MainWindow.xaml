@@ -154,6 +154,14 @@
             <Setter Property="HorizontalAlignment" Value="Right"/>
             <Setter Property="Margin" Value="0,0,10,0"/>
         </Style>
+
+        <!-- 运营商列：过长就省略号，鼠标悬停看两侧 ISP / AS 原文 -->
+        <Style x:Key="CarrierCell" TargetType="TextBlock">
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="0,0,8,0"/>
+            <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+            <Setter Property="ToolTip" Value="{Binding CarrierDetail}"/>
+        </Style>
         <Style x:Key="NumberHeader" TargetType="DataGridColumnHeader">
             <Setter Property="Background" Value="#F5F6F8"/>
             <Setter Property="Foreground" Value="#3C4043"/>
@@ -335,67 +343,83 @@
         <!-- ===== 数据表格 ===== -->
         <TabControl Grid.Row="4" x:Name="MainTabs" Margin="0,10,0,0" Background="Transparent" BorderThickness="0">
             <TabItem Header="链路实时统计">
-                <DataGrid x:Name="StatsGrid" Margin="0,6,0,0">
-                    <DataGrid.Columns>
-                        <DataGridTextColumn Header="链路" Binding="{Binding Name}" Width="180"/>
-                        <DataGridTextColumn Header="目标" Binding="{Binding Target}" Width="170"/>
-                        <DataGridTextColumn Header="目标运营商" Binding="{Binding RemoteCarrier}" Width="100"/>
-                        <DataGridTextColumn Header="平均RTT" Binding="{Binding Avg}" Width="92"
-                                            ElementStyle="{StaticResource NumberCell}" HeaderStyle="{StaticResource NumberHeader}"/>
-                        <DataGridTextColumn Header="P50" Binding="{Binding P50}" Width="82"
-                                            ElementStyle="{StaticResource NumberCell}" HeaderStyle="{StaticResource NumberHeader}"/>
-                        <DataGridTextColumn Header="P95" Binding="{Binding P95}" Width="82"
-                                            ElementStyle="{StaticResource NumberCell}" HeaderStyle="{StaticResource NumberHeader}"/>
-                        <DataGridTextColumn Header="P99" Binding="{Binding P99}" Width="82"
-                                            ElementStyle="{StaticResource NumberCell}" HeaderStyle="{StaticResource NumberHeader}"/>
-                        <DataGridTextColumn Header="发送" Binding="{Binding Sent}" Width="70"
-                                            ElementStyle="{StaticResource NumberCell}" HeaderStyle="{StaticResource NumberHeader}"/>
-                        <DataGridTextColumn Header="丢包" Binding="{Binding Lost}" Width="70"
-                                            ElementStyle="{StaticResource NumberCell}" HeaderStyle="{StaticResource NumberHeader}"/>
-                        <DataGridTextColumn Header="丢包率" Binding="{Binding LossRate}" Width="82"
-                                            ElementStyle="{StaticResource NumberCell}" HeaderStyle="{StaticResource NumberHeader}"/>
-                        <DataGridTextColumn Header="连续丢包" Binding="{Binding ConsecutiveLoss}" Width="92"
-                                            ElementStyle="{StaticResource NumberCell}" HeaderStyle="{StaticResource NumberHeader}"/>
-                        <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="90"/>
-                        <DataGridTextColumn Header="失败原因" Binding="{Binding LastFailure}" Width="180">
-                            <DataGridTextColumn.ElementStyle>
-                                <Style TargetType="TextBlock">
-                                    <Setter Property="ToolTip" Value="{Binding LastFailure}"/>
-                                </Style>
-                            </DataGridTextColumn.ElementStyle>
-                        </DataGridTextColumn>
-                        <DataGridTextColumn Header="对端看到的本端地址" Binding="{Binding SeenFrom}"
-                                            Width="160" MinWidth="150"/>
-                        <DataGridTextColumn Header="本端运营商" Binding="{Binding LocalCarrier}" Width="100"/>
-                        <DataGridTemplateColumn Header="跨网" Width="190">
-                            <DataGridTemplateColumn.CellTemplate>
-                                <DataTemplate>
-                                    <!-- 状态灯：同运营商=绿、跨运营商=红、数据不足=灰；明细看提示框 -->
-                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center"
-                                                ToolTip="{Binding CarrierDetail}">
-                                        <TextBlock Text="●" FontSize="16" Margin="0,0,6,0" VerticalAlignment="Center">
-                                            <TextBlock.Style>
-                                                <Style TargetType="TextBlock">
-                                                    <Setter Property="Foreground" Value="#9AA0A6"/>
-                                                    <Style.Triggers>
-                                                        <DataTrigger Binding="{Binding CrossNetState}" Value="same">
-                                                            <Setter Property="Foreground" Value="#1E8E3E"/>
-                                                        </DataTrigger>
-                                                        <DataTrigger Binding="{Binding CrossNetState}" Value="cross">
-                                                            <Setter Property="Foreground" Value="#C5221F"/>
-                                                        </DataTrigger>
-                                                    </Style.Triggers>
-                                                </Style>
-                                            </TextBlock.Style>
-                                        </TextBlock>
-                                        <TextBlock Text="{Binding CrossNetText}" VerticalAlignment="Center"
-                                                   TextTrimming="CharacterEllipsis" MaxWidth="160"/>
-                                    </StackPanel>
-                                </DataTemplate>
-                            </DataGridTemplateColumn.CellTemplate>
-                        </DataGridTemplateColumn>
-                    </DataGrid.Columns>
-                </DataGrid>
+                <Grid Margin="0,6,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <DataGrid x:Name="StatsGrid" Grid.Row="0"
+                              ToolTip="列很多，窗口窄时最右侧的列需要横向滚动。运营商相关的列固定放在最左边，保证一眼能看到。">
+                        <DataGrid.Columns>
+                            <!-- 运营商相关的列刻意排在最前：窗口窄时右侧的列会被挤出可视区 -->
+                            <DataGridTextColumn Header="链路" Binding="{Binding Name}" Width="150"/>
+                            <DataGridTextColumn Header="目标" Binding="{Binding Target}" Width="150"/>
+                            <DataGridTextColumn Header="目标运营商" Binding="{Binding RemoteCarrier}" Width="90"
+                                                ElementStyle="{StaticResource CarrierCell}"/>
+                            <DataGridTemplateColumn Header="跨网（是否跨运营商）" Width="170">
+                                <DataGridTemplateColumn.CellTemplate>
+                                    <DataTemplate>
+                                        <!-- 状态灯：同运营商=绿、跨运营商=红、数据不足=灰；明细看提示框 -->
+                                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center"
+                                                    ToolTip="{Binding CarrierDetail}">
+                                            <TextBlock Text="●" FontSize="16" Margin="0,0,6,0" VerticalAlignment="Center">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Foreground" Value="#9AA0A6"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding CrossNetState}" Value="same">
+                                                                <Setter Property="Foreground" Value="#1E8E3E"/>
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding CrossNetState}" Value="cross">
+                                                                <Setter Property="Foreground" Value="#C5221F"/>
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                            <TextBlock Text="{Binding CrossNetText}" VerticalAlignment="Center"
+                                                       TextTrimming="CharacterEllipsis" MaxWidth="150"/>
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </DataGridTemplateColumn.CellTemplate>
+                            </DataGridTemplateColumn>
+                            <DataGridTextColumn Header="本端出口（运营商）" Binding="{Binding LocalExitText}" Width="210"
+                                                ElementStyle="{StaticResource CarrierCell}"/>
+
+                            <DataGridTextColumn Header="平均RTT" Binding="{Binding Avg}" Width="86"
+                                                ElementStyle="{StaticResource NumberCell}" HeaderStyle="{StaticResource NumberHeader}"/>
+                            <DataGridTextColumn Header="P50" Binding="{Binding P50}" Width="74"
+                                                ElementStyle="{StaticResource NumberCell}" HeaderStyle="{StaticResource NumberHeader}"/>
+                            <DataGridTextColumn Header="P95" Binding="{Binding P95}" Width="74"
+                                                ElementStyle="{StaticResource NumberCell}" HeaderStyle="{StaticResource NumberHeader}"/>
+                            <DataGridTextColumn Header="P99" Binding="{Binding P99}" Width="74"
+                                                ElementStyle="{StaticResource NumberCell}" HeaderStyle="{StaticResource NumberHeader}"/>
+                            <DataGridTextColumn Header="发送" Binding="{Binding Sent}" Width="60"
+                                                ElementStyle="{StaticResource NumberCell}" HeaderStyle="{StaticResource NumberHeader}"/>
+                            <DataGridTextColumn Header="丢包" Binding="{Binding Lost}" Width="60"
+                                                ElementStyle="{StaticResource NumberCell}" HeaderStyle="{StaticResource NumberHeader}"/>
+                            <DataGridTextColumn Header="丢包率" Binding="{Binding LossRate}" Width="74"
+                                                ElementStyle="{StaticResource NumberCell}" HeaderStyle="{StaticResource NumberHeader}"/>
+                            <DataGridTextColumn Header="连续丢包" Binding="{Binding ConsecutiveLoss}" Width="82"
+                                                ElementStyle="{StaticResource NumberCell}" HeaderStyle="{StaticResource NumberHeader}"/>
+                            <DataGridTextColumn Header="状态" Binding="{Binding Status}" Width="80"/>
+                            <DataGridTextColumn Header="失败原因" Binding="{Binding LastFailure}" Width="150">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="ToolTip" Value="{Binding LastFailure}"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
+                            <DataGridTextColumn Header="对端看到的本端地址" Binding="{Binding SeenFrom}"
+                                                Width="*" MinWidth="150"/>
+                        </DataGrid.Columns>
+                    </DataGrid>
+
+                    <!-- 运营商查询状态：直接回答"为什么这里没显示运营商" -->
+                    <TextBlock x:Name="IspNote" Grid.Row="1" Margin="2,6,0,0" Foreground="#5F6368"
+                               TextWrapping="Wrap" Visibility="Collapsed"/>
+                </Grid>
             </TabItem>
 
             <TabItem Header="异常记录（本会话）">
