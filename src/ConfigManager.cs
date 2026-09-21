@@ -208,8 +208,19 @@ public static class ConfigManager
         {
             if (string.IsNullOrWhiteSpace(registrar.PublicHost))
                 problems.Add("Registrar.PublicHost 不能为空（本端外网地址需手工填写；只想测别人可关闭 Distributable / 界面上的“参与网状”）");
+
             if (registrar.PublicPort < 1 || registrar.PublicPort > 65535)
                 problems.Add($"Registrar.PublicPort 必须在 1~65535 之间（当前是 {registrar.PublicPort}）");
+
+            // 多地址：每一个都要能分发（写错一个，其他节点就会照着错地址建链路）
+            foreach (var host in registrar.PublicHosts ?? new List<string>())
+            {
+                var value = host?.Trim() ?? "";
+                if (value.Length == 0) continue;
+
+                if (!Registry.RegistryAddressRules.IsDistributable(value, out _, out var reason))
+                    problems.Add($"Registrar.PublicHosts 里的 {value} 不可分发：{reason}");
+            }
         }
         else if (registrar.PublicPort != 0 && (registrar.PublicPort < 1 || registrar.PublicPort > 65535))
         {

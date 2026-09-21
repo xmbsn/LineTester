@@ -462,8 +462,17 @@ internal static partial class Program
                 Eq("未启用时本端列", "未启用", offRow.LocalCarrier);
                 Check("未启用时提示说明不发数据", offRow.CarrierDetail.Contains("不会把 IP 发给"), offRow.CarrierDetail);
 
-                // 关掉开关：行立刻回到"未启用"，且不再查询
+                // 停止测试后统计表还在 → 运营商信息必须继续显示（现场反馈过：停止后整列变"未启用"）
+                var beforeStop = rows.Cast<StatRow>().Select(r => (r.LocalCarrier, r.RemoteCarrier, r.CrossNetState)).ToList();
                 InvokePrivateHandler(window, "Stop_Click");
+                Pump(1500);
+
+                var afterStop = rows.Cast<StatRow>().Select(r => (r.LocalCarrier, r.RemoteCarrier, r.CrossNetState)).ToList();
+                Eq("停止测试后运营商信息保持不变（不再被改写）", string.Join("|", beforeStop), string.Join("|", afterStop));
+                Check("停止后没有变成“未启用”", afterStop.All(x => x.LocalCarrier != "未启用"), string.Join("|", afterStop));
+                Check("停止后查询服务仍在（缓存可复用）", GetPrivateField(window, "_isp") is not null);
+
+                // 关掉开关：行立刻回到"未启用"，且不再查询
                 var ispCheck = (CheckBox)window.FindName("IspCheck")!;
                 ispCheck.IsChecked = false;
                 Pump(300);

@@ -10,7 +10,12 @@ public sealed class RegistryNode
 {
     public string NodeId { get; set; } = "";
     public string Name { get; set; } = "";
+
+    /// <summary>主外网地址。</summary>
     public string Ip { get; set; } = "";
+
+    /// <summary>该节点的全部外网地址（含主地址；同一机房多个出口 IP 时会有多条）。</summary>
+    public List<string> Ips { get; set; } = new();
     public int Port { get; set; }
     public bool Tcp { get; set; }
     public bool Udp { get; set; }
@@ -148,9 +153,15 @@ public sealed class RegistryStore
         // 地址检查只针对**会被分发出去**的节点：它没有可被访问的地址，别人就会去连错地址。
         // 自报 Distributable=false 的节点（只想测别人、不需要被别人测）不会被分发，
         // 因此允许地址留空或填回环——否则"纯客户端"根本注册不上，也就测不了别人。
-        if (message.Distributable &&
-            !RegistryAddressRules.IsDistributable(message.Ip, out var errorCode, out var errorMessage))
-            return RegistryUpsertResult.Rejected(errorCode, errorMessage);
+        var addresses = message.AllIps;
+        if (message.Distributable)
+        {
+            foreach (var address in addresses)
+            {
+                if (!RegistryAddressRules.IsDistributable(address, out var code, out var text))
+                    return RegistryUpsertResult.Rejected(code, $"{address}：{text}");
+            }
+        }
 
         var now = _clock();
         var node = _state.Nodes.FirstOrDefault(n => string.Equals(n.NodeId, message.NodeId, StringComparison.Ordinal));
@@ -178,13 +189,15 @@ public sealed class RegistryStore
             node.Port != message.Port ||
             node.Tcp != message.Tcp ||
             node.Udp != message.Udp ||
-            node.Distributable != message.Distributable)
+            node.Distributable != message.Distributable ||
+            !node.Ips.SequenceEqual(addresses, StringComparer.OrdinalIgnoreCase))
         {
             changed = true;
         }
 
         node.Name = message.Name;
         node.Ip = message.Ip;
+        node.Ips = addresses;
         node.Port = message.Port;
         node.Tcp = message.Tcp;
         node.Udp = message.Udp;
@@ -290,6 +303,8 @@ public sealed class RegistryStore
                 NodeId = n.NodeId,
                 Name = n.Name,
                 Ip = n.Ip,
+                // 多地址只在真的多于一个时才下发：单地址保持与老客户端/老中心完全一致的报文
+                Ips = n.Ips.Count > 1 ? n.Ips.ToList() : null,
                 Port = n.Port,
                 Tcp = n.Tcp,
                 Udp = n.Udp,

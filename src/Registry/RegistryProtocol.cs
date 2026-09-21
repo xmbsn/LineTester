@@ -148,16 +148,54 @@ public sealed class RegisterMessage
     public string ReqId { get; set; } = "";
     public string NodeId { get; set; } = "";
     public string Name { get; set; } = "";
+
+    /// <summary>主外网地址（老中心/老客户端只认这个字段）。</summary>
     public string Ip { get; set; } = "";
+
     public int Port { get; set; }
     public bool Tcp { get; set; }
     public bool Udp { get; set; }
     public bool Distributable { get; set; } = true;
     public string Instance { get; set; } = "";
     public ulong Rev { get; set; }
+
+    /// <summary>
+    /// 本节点的**全部**外网地址（含主地址，端口相同）。同一机房有多个出口 IP 时用得上。
+    /// 只有一个地址时可以不带（老中心会忽略这个字段，仍按 <see cref="Ip"/> 处理）。
+    /// </summary>
+    public List<string>? Ips { get; set; }
+
     public long Ts { get; set; }
     public string Nonce { get; set; } = "";
     public string Mac { get; set; } = "";
+
+    /// <summary>有效地址列表：带了 Ips 就用它，否则退化为单个 Ip。</summary>
+    [JsonIgnore]
+    public List<string> AllIps
+    {
+        get
+        {
+            var list = new List<string>(4);
+            if (Ips is not null)
+            {
+                foreach (var ip in Ips)
+                {
+                    var value = ip?.Trim() ?? "";
+                    if (value.Length > 0 && !list.Contains(value, StringComparer.OrdinalIgnoreCase)) list.Add(value);
+                }
+            }
+
+            var primary = Ip?.Trim() ?? "";
+            if (primary.Length > 0)
+            {
+                // 主地址必须排第一：老中心/老客户端只读 Ip 字段，顺序不一致会让"主地址"与 Ips[0] 打架
+                list.RemoveAll(item => string.Equals(item, primary, StringComparison.OrdinalIgnoreCase));
+                list.Insert(0, primary);
+            }
+
+            return list;
+        }
+    }
 }
 
 public sealed class SyncMessage
@@ -175,11 +213,45 @@ public sealed class NodeSnapshot
 {
     public string NodeId { get; set; } = "";
     public string Name { get; set; } = "";
+
+    /// <summary>主外网地址。</summary>
     public string Ip { get; set; } = "";
+
     public int Port { get; set; }
     public bool Tcp { get; set; }
     public bool Udp { get; set; }
     public bool Online { get; set; } = true;
+
+    /// <summary>全部外网地址（含主地址）；只有一个地址时可不带。</summary>
+    public List<string>? Ips { get; set; }
+
+    /// <summary>有效地址列表：带了 Ips 就用它，否则退化为单个 Ip。</summary>
+    [JsonIgnore]
+    public List<string> AllIps
+    {
+        get
+        {
+            var list = new List<string>(4);
+            if (Ips is not null)
+            {
+                foreach (var ip in Ips)
+                {
+                    var value = ip?.Trim() ?? "";
+                    if (value.Length > 0 && !list.Contains(value, StringComparer.OrdinalIgnoreCase)) list.Add(value);
+                }
+            }
+
+            var primary = Ip?.Trim() ?? "";
+            if (primary.Length > 0)
+            {
+                // 主地址必须排第一：老中心/老客户端只读 Ip 字段，顺序不一致会让"主地址"与 Ips[0] 打架
+                list.RemoveAll(item => string.Equals(item, primary, StringComparison.OrdinalIgnoreCase));
+                list.Insert(0, primary);
+            }
+
+            return list;
+        }
+    }
 }
 
 /// <summary>中心回显"它看到的请求源地址"，供客户端与手填的 PublicHost 交叉核对。</summary>

@@ -105,8 +105,15 @@ public sealed class RegistrarConfig
     /// <summary>
     /// 本端对外地址，<b>必须手工填写</b>：出向连接的 NAT 源端口 ≠ 入向映射端口，
     /// 因此不能用"注册中心看到的源地址"自动推断（规格 §6.3）。
+    /// 这是**主地址**；同一机房有多个外网 IP 时，其余写进 <see cref="PublicHosts"/>。
     /// </summary>
     public string PublicHost { get; set; } = "";
+
+    /// <summary>
+    /// 本端其余外网地址（不含主地址；端口相同）。
+    /// 一个机房可能有多个出口 IP（例如东莞机房有 3 个），其他节点会为每个地址各生成一条链路。
+    /// </summary>
+    public List<string> PublicHosts { get; set; } = new();
 
     /// <summary>本端对外端口（机房映射的那个）。</summary>
     public int PublicPort { get; set; }

@@ -20,7 +20,28 @@ public sealed class RegistrarDraft
     public bool Enabled { get; set; }
     public bool ServeAsCenter { get; set; }
     public string NodeName { get; set; } = "";
+
+    /// <summary>主外网地址（界面上第一个）。</summary>
     public string PublicHost { get; set; } = "";
+
+    /// <summary>其余外网地址（同一机房多个出口 IP）。</summary>
+    public List<string> PublicHosts { get; set; } = new();
+
+    /// <summary>全部对外地址（主地址在前，去重）。</summary>
+    public List<string> AllPublicHosts
+    {
+        get
+        {
+            var list = new List<string>(4);
+            foreach (var host in new[] { PublicHost }.Concat(PublicHosts))
+            {
+                var value = host?.Trim() ?? "";
+                if (value.Length > 0 && !list.Contains(value, StringComparer.OrdinalIgnoreCase)) list.Add(value);
+            }
+            return list;
+        }
+    }
+
     public string PublicPortText { get; set; } = "";
     public bool Distributable { get; set; } = true;
     public bool AdvertiseTcp { get; set; } = true;
@@ -44,6 +65,7 @@ public sealed class RegistrarDraft
         ServeAsCenter = config.ServeAsCenter,
         NodeName = config.NodeName,
         PublicHost = config.PublicHost,
+        PublicHosts = config.PublicHosts?.Where(h => !string.IsNullOrWhiteSpace(h)).Select(h => h.Trim()).ToList() ?? new List<string>(),
         PublicPortText = config.PublicPort > 0 ? config.PublicPort.ToString(CultureInfo.InvariantCulture) : "",
         Distributable = config.Distributable,
         AdvertiseTcp = config.AdvertiseTcp,
@@ -70,7 +92,9 @@ public sealed class RegistrarDraft
         config.Enabled = Enabled;
         config.ServeAsCenter = ServeAsCenter;
         config.NodeName = NodeName.Trim();
-        config.PublicHost = PublicHost.Trim();
+        var hosts = AllPublicHosts;
+        config.PublicHost = hosts.Count > 0 ? hosts[0] : "";
+        config.PublicHosts = hosts.Count > 1 ? hosts.Skip(1).ToList() : new List<string>();
         config.PublicPort = ParseInt(PublicPortText);
         config.Distributable = Distributable;
         config.AdvertiseTcp = AdvertiseTcp;
@@ -108,23 +132,33 @@ public sealed class RegistrarDraft
         // 与"注册中心在哪里"是两回事——现场最容易把这两个端口填混。
         if (Distributable)
         {
-            var hostProblem = DescribeHostProblem("本端外网地址", PublicHost, required: true);
-            if (hostProblem.Length > 0)
+            var hosts = AllPublicHosts;
+            if (hosts.Count == 0)
             {
-                problems.Add(PublicHost.Trim().Length == 0
-                    ? "请填写本端外网地址（其他节点连本机用的地址，出方向 NAT 源端口 ≠ 入方向映射端口，" +
-                      "必须手工填写）。如果本机只想测别人、不需要被别人测，请取消勾选「参与网状」"
-                    : hostProblem);
+                problems.Add("请填写本端外网地址（其他节点连本机用的地址，出方向 NAT 源端口 ≠ 入方向映射端口，" +
+                             "必须手工填写）。如果本机只想测别人、不需要被别人测，请取消勾选「参与网状」");
+            }
+            else
+            {
+                // 每个地址都要合法：其中一个写错，其他节点就会照着错地址建链路
+                foreach (var host in hosts)
+                {
+                    var hostProblem = DescribeHostProblem("本端外网地址", host, required: true);
+                    if (hostProblem.Length > 0) problems.Add(hostProblem);
+                }
             }
 
             var portProblem = DescribePortProblem("本端外网端口", PublicPortText);
             if (portProblem.Length > 0) problems.Add(portProblem);
         }
-        else if (!string.IsNullOrWhiteSpace(PublicHost) || !string.IsNullOrWhiteSpace(PublicPortText))
+        else if (AllPublicHosts.Count > 0 || !string.IsNullOrWhiteSpace(PublicPortText))
         {
             // 不参与网状时地址可以留空；但填了就要填对，否则会让人以为"改了已经生效"
-            var hostProblem = DescribeHostProblem("本端外网地址", PublicHost, required: false);
-            if (hostProblem.Length > 0) problems.Add(hostProblem);
+            foreach (var host in AllPublicHosts)
+            {
+                var hostProblem = DescribeHostProblem("本端外网地址", host, required: false);
+                if (hostProblem.Length > 0) problems.Add(hostProblem);
+            }
 
             var portProblem = DescribePortProblem("本端外网端口", PublicPortText, required: false);
             if (portProblem.Length > 0) problems.Add(portProblem);

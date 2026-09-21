@@ -47,66 +47,80 @@ public static class RegistrySync
             targets.Add(node);
         }
 
-        // 2) manual 链路原样保留；registry 链路按 NodeId 建索引，便于原地更新
+        // 2) manual 链路原样保留；registry 链路按「节点 + 地址」建索引
+        //    （同一个机房可能有多个外网 IP，同一个 NodeId 会对应多条链路）
         var result = new List<LinkConfig>(existing.Count + targets.Count);
-        var currentByNodeId = new Dictionary<string, LinkConfig>(StringComparer.Ordinal);
+        var currentByKey = new Dictionary<string, LinkConfig>(StringComparer.Ordinal);
 
         foreach (var link in existing)
         {
             if (link.Source == LinkSources.Registry && !string.IsNullOrEmpty(link.NodeId))
-                currentByNodeId[link.NodeId] = link;
+                currentByKey[Key(link.NodeId, link.Host)] = link;
             else
                 result.Add(link);
         }
 
-        // 3) 逐个目标：新增或原地更新（保留 LocalDisabled）
+        // 3) 逐个目标、逐个地址：新增或原地更新（保留 LocalDisabled）
         var added = 0;
         var updated = 0;
         var used = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var node in targets)
         {
-            var name = string.IsNullOrWhiteSpace(node.Name) ? $"{node.Ip}:{node.Port}" : node.Name.Trim();
-            currentByNodeId.TryGetValue(node.NodeId, out var current);
+            var baseName = string.IsNullOrWhiteSpace(node.Name) ? $"{node.Ip}:{node.Port}" : node.Name.Trim();
+            var addresses = node.AllIps.Count > 0 ? node.AllIps : new List<string> { node.Ip };
 
-            var localDisabled = current?.LocalDisabled ?? false;
-            var tcp = node.Tcp && !localDisabled;
-            var udp = node.Udp && !localDisabled;
-
-            if (current is null)
+            for (var i = 0; i < addresses.Count; i++)
             {
-                added++;
+                var ip = addresses[i];
+
+                // 主地址用节点名，其余加 #2/#3 后缀：既能在统计表里区分，又能一眼看出是同一个机房
+                var name = i == 0 ? baseName : $"{baseName}#{i + 1}";
+
+                currentByKey.TryGetValue(Key(node.NodeId, ip), out var current);
+
+                var localDisabled = current?.LocalDisabled ?? false;
+                var tcp = node.Tcp && !localDisabled;
+                var udp = node.Udp && !localDisabled;
+
+                if (current is null)
+                {
+                    added++;
+                }
+                else if (current.Name != name ||
+                         current.Port != node.Port ||
+                         current.Tcp != tcp ||
+                         current.Udp != udp)
+                {
+                    updated++;
+                }
+
+                used.Add(Key(node.NodeId, ip));
+                result.Add(new LinkConfig
+                {
+                    Name = name,
+                    Host = ip,
+                    Port = node.Port,
+                    Tcp = tcp,
+                    Udp = udp,
+                    Source = LinkSources.Registry,
+                    NodeId = node.NodeId,
+                    LocalDisabled = localDisabled
+                });
             }
-            else if (current.Name != name ||
-                     current.Host != node.Ip ||
-                     current.Port != node.Port ||
-                     current.Tcp != tcp ||
-                     current.Udp != udp)
-            {
-                updated++;
-            }
-
-            used.Add(node.NodeId);
-            result.Add(new LinkConfig
-            {
-                Name = name,
-                Host = node.Ip,
-                Port = node.Port,
-                Tcp = tcp,
-                Udp = udp,
-                Source = LinkSources.Registry,
-                NodeId = node.NodeId,
-                LocalDisabled = localDisabled
-            });
         }
 
-        // 4) 已在本地、但目标集合里没有的注册链路 → 删除（这就是"中心删节点后其他节点消失"）
+        // 4) 已在本地、但目标集合里没有的注册链路 → 删除（中心删节点、或对方撤掉某个 IP）
         var removed = 0;
-        foreach (var nodeId in currentByNodeId.Keys)
+        foreach (var key in currentByKey.Keys)
         {
-            if (!used.Contains(nodeId)) removed++;
+            if (!used.Contains(key)) removed++;
         }
 
         return new SyncOutcome(result, added, updated, removed, skipped);
     }
+
+    /// <summary>注册链路的身份：来源节点 + 该节点的一个外网地址。</summary>
+    public static string Key(string nodeId, string ip)
+        => $"{nodeId}|{ip?.Trim() ?? ""}";
 }

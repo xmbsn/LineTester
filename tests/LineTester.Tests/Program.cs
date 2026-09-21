@@ -74,6 +74,7 @@ internal static partial class Program
             TestIpv4Box();
             TestRegistryPanelUi();
             TestRegistryMainWindowUi();
+            TestRegistryMultiAddress();
             TestNodeNameHeader();
             TestIspCarrier();
             TestIspResponseParsing();

@@ -781,8 +781,10 @@ public partial class MainWindow : Window
         cts?.Cancel();
 
         StopRegistryClient();
-        StopIspLookup();
 
+        // 注意：**不**停运营商查询。停止测试后统计表还在，行里的运营商信息必须继续显示——
+        // "停止测试"只是不再发包，不是把已经查到的资料藏起来（曾因为在这里销毁服务，
+        // 停止后整个运营商列变成"未启用"）。
         _server?.Dispose();
         _server = null;
 
@@ -831,6 +833,12 @@ public partial class MainWindow : Window
             NodeName = _settings.Registrar.NodeName,
             PublicHost = _settings.Registrar.PublicHost,
             PublicPort = _settings.Registrar.PublicPort,
+            Ips = new[] { _settings.Registrar.PublicHost }
+                .Concat(_settings.Registrar.PublicHosts ?? new List<string>())
+                .Where(h => !string.IsNullOrWhiteSpace(h))
+                .Select(h => h.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList(),
             Tcp = _settings.Registrar.AdvertiseTcp,
             Udp = _settings.Registrar.AdvertiseUdp,
             Distributable = _settings.Registrar.Distributable,
@@ -1107,7 +1115,19 @@ public partial class MainWindow : Window
     /// </summary>
     private void ApplyCarrier(StatRow row)
     {
-        var enabled = _isp?.Enabled == true && IspCheck.IsChecked == true;
+        // 开关才是"用户意图"；服务实例只是手段。服务不在（例如刚启动/刚停过）就地补起来，
+        // 否则统计表里已经查到的运营商会因为"服务对象没了"被改写成"未启用"。
+        var wanted = IspCheck.IsChecked == true;
+
+        if (!wanted)
+        {
+            row.SetCarrier(null, null, enabled: false);
+            return;
+        }
+
+        StartIspLookup();
+
+        var enabled = _isp is not null;
 
         if (!enabled)
         {

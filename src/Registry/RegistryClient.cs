@@ -13,6 +13,9 @@ public sealed class RegistryClientOptions
     public string PublicHost { get; set; } = "";
     public int PublicPort { get; set; }
 
+    /// <summary>本端全部外网地址（含主地址）；多于一个时会随注册一起下发。</summary>
+    public List<string> Ips { get; set; } = new();
+
     /// <summary>对外宣告"可被探测的协议"（对应 AdvertiseTcp/AdvertiseUdp）。</summary>
     public bool Tcp { get; set; } = true;
 
@@ -229,6 +232,8 @@ public sealed class RegistryClient : IDisposable
             Name = _options.NodeName,
             Ip = _options.PublicHost,
             Port = _options.PublicPort,
+            // 多地址才带：单地址时保持与老中心/老客户端完全一致的报文
+            Ips = _options.Ips.Count > 1 ? _options.Ips.ToList() : null,
             Tcp = _options.Tcp,
             Udp = _options.Udp,
             Distributable = _options.Distributable,

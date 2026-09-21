@@ -527,6 +527,9 @@ internal static partial class Program
             Check("含可被 UDP 探测开关", panel.FindName("AdvertiseUdpCheck") is CheckBox);
             Check("含立即注册按钮", panel.FindName("RegisterNowButton") is Button);
             Check("含中心节点表", panel.FindName("NodeGrid") is DataGrid);
+            Check("含外网地址列表（一机房多 IP）", panel.FindName("PublicHostsList") is ListBox);
+            Check("含「添加」外网地址按钮", panel.FindName("AddPublicHostButton") is Button);
+            Check("含「删除所选」外网地址按钮", panel.FindName("RemovePublicHostButton") is Button);
 
             var config = new RegistrarConfig
             {
@@ -549,6 +552,70 @@ internal static partial class Program
 
             Eq("界面按配置填充节点名称", "机房A", ((TextBox)panel.FindName("NodeNameBox")!).Text);
             Eq("界面按配置填充外网地址", "203.0.113.9", ((Ipv4Box)panel.FindName("PublicHostBox")!).Text);
+            Eq("单地址时列表里也有一行（标出主地址）",
+                "203.0.113.9（主）",
+                ((ListBox)panel.FindName("PublicHostsList")!).Items.Count == 1
+                    ? (string)((ListBox)panel.FindName("PublicHostsList")!).Items[0]!
+                    : "条数=" + ((ListBox)panel.FindName("PublicHostsList")!).Items.Count);
+            // ---- 一机房多 IP：列表 / 添加 / 删除 / 往返 ----
+            var hostList = (ListBox)panel.FindName("PublicHostsList")!;
+            var multiConfig = new RegistrarConfig
+            {
+                Enabled = true,
+                NodeName = "东莞机房",
+                PublicHost = "120.233.128.228",
+                PublicHosts = new List<string> { "157.255.153.208", "183.60.150.36" },
+                PublicPort = 16298,
+                CenterHost = "203.0.113.1",
+                CenterPort = 16298
+            };
+
+            panel.Load(multiConfig);
+            Eq("列表显示全部 3 个地址", 3, hostList.Items.Count);
+            Eq("第一行标出主地址", "120.233.128.228（主）", (string)hostList.Items[0]!);
+            Eq("第二行是额外地址", "157.255.153.208", (string)hostList.Items[1]!);
+
+            var multiTarget = new RegistrarConfig();
+            Check("多地址配置可读回", panel.TryReadInto(multiTarget, out var multiError), multiError);
+            Eq("读回：主地址", "120.233.128.228", multiTarget.PublicHost);
+            Eq("读回：其余地址", "157.255.153.208,183.60.150.36", string.Join(",", multiTarget.PublicHosts));
+
+            var pickAlerts = new List<string>();
+            panel.Alert = (message, _) => pickAlerts.Add(message);
+
+            ((Ipv4Box)panel.FindName("PublicHostBox")!).Text = "221.5.88.88";
+            ((Button)panel.FindName("AddPublicHostButton")!).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Eq("添加后列表 4 个", 4, hostList.Items.Count);
+
+            ((Button)panel.FindName("AddPublicHostButton")!).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Eq("重复添加被拦下（仍是 4 个）", 4, hostList.Items.Count);
+            Check("重复添加给出提示", pickAlerts.Any(a => a.Contains("已经在列表里")), string.Join(" / ", pickAlerts));
+
+            var afterAdd = new RegistrarConfig();
+            Check("添加后可读回", panel.TryReadInto(afterAdd, out var addError), addError);
+            Eq("读回包含新地址", "157.255.153.208,183.60.150.36,221.5.88.88",
+                string.Join(",", afterAdd.PublicHosts));
+
+            hostList.SelectedItems.Clear();
+            hostList.SelectedItems.Add(hostList.Items[1]!);
+            ((Button)panel.FindName("RemovePublicHostButton")!).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Eq("删除后列表 3 个", 3, hostList.Items.Count);
+
+            var afterRemove = new RegistrarConfig();
+            Check("删除后可读回", panel.TryReadInto(afterRemove, out var removeError), removeError);
+            Eq("被删的地址不再出现", "183.60.150.36,221.5.88.88", string.Join(",", afterRemove.PublicHosts));
+            Check("主地址仍是第一个", afterRemove.PublicHost == "120.233.128.228", afterRemove.PublicHost);
+
+            hostList.SelectedItems.Clear();
+            foreach (var item in hostList.Items.Cast<object>().ToList()) hostList.SelectedItems.Add(item);
+            ((Button)panel.FindName("RemovePublicHostButton")!).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            ((Ipv4Box)panel.FindName("PublicHostBox")!).Text = "";
+            Check("地址全部清空后被拦下",
+                !panel.TryReadInto(new RegistrarConfig(), out var emptyHostError) &&
+                emptyHostError.Contains("本端外网地址"), emptyHostError);
+
+            panel.Load(config); // 还原成单地址配置，继续后面的断言
+
             Eq("界面按配置填充外网端口", "9000", ((TextBox)panel.FindName("PublicPortBox")!).Text);
             Eq("界面按配置填充中心地址", "203.0.113.1", ((Ipv4Box)panel.FindName("CenterHostBox")!).Text);
             Eq("界面按配置填充密钥", "s3cret", ((PasswordBox)panel.FindName("SecretBox")!).Password);
@@ -1111,6 +1178,130 @@ internal static partial class Program
         }
 
         return null;
+    }
+
+    // ---------------- 一机房多 IP ----------------
+
+    /// <summary>
+    /// 现场需求：同一个机房可能有多个外网 IP、端口相同（例如东莞机房 120.233.128.228 / 157.255.153.208 /
+    /// 183.60.150.36）。注册时带上全部地址，其他节点为**每个地址各生成一条链路**，
+    /// 这样三个地址的运营商与线路质量能分别看。
+    /// </summary>
+    private static void TestRegistryMultiAddress()
+    {
+        Section("链路注册：一个节点多个外网 IP（每个地址各一条链路）");
+
+        // ---- 协议层：Ips 字段与有效地址列表 ----
+        var message = new RegisterMessage
+        {
+            NodeId = "dg",
+            Name = "东莞机房",
+            Ip = "120.233.128.228",
+            Port = 16298,
+            Tcp = true,
+            Udp = true,
+            Ips = new List<string> { "120.233.128.228", "157.255.153.208", "183.60.150.36" }
+        };
+        Eq("有效地址 3 个", 3, message.AllIps.Count);
+        Eq("主地址排第一", "120.233.128.228", message.AllIps[0]);
+
+        var legacyMessage = new RegisterMessage { Ip = "203.0.113.9", Port = 9000 };
+        Eq("老报文（只有 Ip）有效地址 1 个", 1, legacyMessage.AllIps.Count);
+        Eq("老报文地址", "203.0.113.9", legacyMessage.AllIps[0]);
+
+        var duplicated = new RegisterMessage
+        {
+            Ip = "1.1.1.1",
+            Ips = new List<string> { "2.2.2.2", "1.1.1.1", "2.2.2.2" }
+        };
+        Eq("重复地址去重且主地址在前", "1.1.1.1,2.2.2.2", string.Join(",", duplicated.AllIps));
+
+        // ---- 中心：存下全部地址，快照里带出去 ----
+        var root = Path.Combine(AppContext.BaseDirectory, ".testtmp", "multi_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var store = new RegistryStore(Path.Combine(root, "registry.json"), 60);
+
+        Check("三个地址都能注册", store.Upsert(message, authenticated: true).Accepted);
+        var node = store.Nodes.First(n => n.NodeId == "dg");
+        Eq("中心存下 3 个地址", 3, node.Ips.Count);
+        Eq("中心里的主地址", "120.233.128.228", node.Ip);
+
+        var snapshot = store.BuildSnapshot().First(n => n.NodeId == "dg");
+        Eq("快照带出 3 个地址", 3, snapshot.AllIps.Count);
+        Eq("快照的主地址字段仍是第一个（老客户端只读它）", "120.233.128.228", snapshot.Ip);
+
+        // 单个地址的节点：快照不下发 Ips（保持与老客户端一致的报文）
+        store.Upsert(new RegisterMessage { NodeId = "one", Name = "单地址机房", Ip = "203.0.113.9", Port = 9000, Tcp = true, Udp = true }, true);
+        var single = store.BuildSnapshot().First(n => n.NodeId == "one");
+        Check("单地址节点的快照不带 Ips 字段（兼容老客户端）", single.Ips is null);
+        Eq("单地址节点有效地址仍是 1 个", 1, single.AllIps.Count);
+
+        // 地址不合法（回环）→ 整条注册被拒，且错误里点出是哪个地址
+        var bad = store.Upsert(new RegisterMessage
+        {
+            NodeId = "bad",
+            Name = "坏地址",
+            Ip = "203.0.113.9",
+            Port = 9000,
+            Ips = new List<string> { "203.0.113.9", "127.0.0.1" }
+        }, true);
+        Check("多地址里有一个不可分发 → 拒绝注册", !bad.Accepted);
+        Check("拒绝原因指出是哪个地址", (bad.ErrorMessage ?? "").Contains("127.0.0.1"), bad.ErrorMessage);
+
+        // ---- 对端：为每个地址各生成一条链路 ----
+        var outcome = RegistrySync.Apply(store.BuildSnapshot(), "self", new List<LinkConfig>());
+        var dgLinks = outcome.Links.Where(l => l.NodeId == "dg").OrderBy(l => l.Name, StringComparer.Ordinal).ToList();
+        Eq("东莞机房生成 3 条链路", 3, dgLinks.Count);
+        Check("三条链路的目标是三个不同地址",
+            dgLinks.Select(l => l.Host).OrderBy(h => h, StringComparer.Ordinal)
+                .SequenceEqual(new[] { "120.233.128.228", "157.255.153.208", "183.60.150.36" }),
+            string.Join(",", dgLinks.Select(l => l.Host)));
+        Check("三条链路端口相同", dgLinks.All(l => l.Port == 16298));
+        Check("主地址用节点名，其余带 #2/#3",
+            dgLinks.Any(l => l.Name == "东莞机房") &&
+            dgLinks.Any(l => l.Name == "东莞机房#2") &&
+            dgLinks.Any(l => l.Name == "东莞机房#3"),
+            string.Join(",", dgLinks.Select(l => l.Name)));
+        Check("三条链路都是注册来源且 NodeId 相同",
+            dgLinks.All(l => l.Source == LinkSources.Registry && l.NodeId == "dg"));
+
+        // 幂等：同样快照再来一次，不新增不删除
+        var again = RegistrySync.Apply(store.BuildSnapshot(), "self", outcome.Links);
+        Eq("重复同步不新增链路", 0, again.Added);
+        Eq("重复同步不删除链路", 0, again.Removed);
+
+        // 对方撤掉一个地址 → 只删那一条
+        store.Upsert(new RegisterMessage
+        {
+            NodeId = "dg",
+            Name = "东莞机房",
+            Ip = "120.233.128.228",
+            Port = 16298,
+            Tcp = true,
+            Udp = true,
+            Ips = new List<string> { "120.233.128.228", "183.60.150.36" }
+        }, true);
+
+        var afterRemoval = RegistrySync.Apply(store.BuildSnapshot(), "self", outcome.Links);
+        Eq("撤掉一个地址后删掉 1 条链路", 1, afterRemoval.Removed);
+        var remaining = afterRemoval.Links.Where(l => l.NodeId == "dg").ToList();
+        Eq("剩下 2 条", 2, remaining.Count);
+        Check("被撤掉的地址不再出现", remaining.All(l => l.Host != "157.255.153.208"));
+
+        // 某个地址本地停测：只影响那一条
+        var links = afterRemoval.Links;
+        var target = links.First(l => l.NodeId == "dg" && l.Host == "183.60.150.36");
+        target.LocalDisabled = true;
+        target.Tcp = false;
+        target.Udp = false;
+
+        var afterLocalStop = RegistrySync.Apply(store.BuildSnapshot(), "self", links);
+        var stopped = afterLocalStop.Links.First(l => l.NodeId == "dg" && l.Host == "183.60.150.36");
+        Check("本地停测的那条保持不发包", stopped.LocalDisabled && !stopped.Tcp && !stopped.Udp);
+        Check("同机房另外一条不受影响",
+            afterLocalStop.Links.Any(l => l.NodeId == "dg" && l.Host == "120.233.128.228" && l.Tcp));
+
+        try { Directory.Delete(root, true); } catch { }
     }
 
     // ---------------- 运行中改链路（现场反馈） ----------------
