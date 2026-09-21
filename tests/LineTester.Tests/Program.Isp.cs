@@ -364,28 +364,37 @@ internal static partial class Program
                 var window = new MainWindow();
 
                 var statsGrid = (DataGrid)window.FindName("StatsGrid")!;
-                Check("统计表新增「目标运营商」列", statsGrid.Columns.Any(c => Equals(c.Header, "目标运营商")));
-                Check("统计表新增「跨网（是否跨运营商）」列",
-                    statsGrid.Columns.Any(c => Equals(c.Header, "跨网（是否跨运营商）")));
-                Check("统计表新增「本端出口（运营商）」列",
+                Check("统计表含「目标运营商」列", statsGrid.Columns.Any(c => Equals(c.Header, "目标运营商")));
+                Check("统计表含「跨网」列", statsGrid.Columns.Any(c => Equals(c.Header, "跨网")));
+                Check("统计表含「本端出口（运营商）」列",
                     statsGrid.Columns.Any(c => Equals(c.Header, "本端出口（运营商）")));
                 Check("运营商开关默认勾选（可按需关闭）",
                     window.FindName("IspCheck") is CheckBox { IsChecked: true });
 
-                // 现场反馈"运营商信息没有显示"的根因：列太多、窗口放不下，新列被挤到可视区之外。
-                // 因此固定要求：运营商相关列必须排在前几列，且"这些列 + 前两列"要能在默认窗口宽度内看全。
+                // 现场反馈：统计表首先看**测试结果**，运营商信息放最后。
+                // 同时必须保证整表一屏放得下（否则最后一列又被挤出可视区 = 等于没有）。
                 var headers = statsGrid.Columns.Select(c => c.Header?.ToString() ?? "").ToList();
-                Check("「目标」仍是第 2 列", headers.Count > 1 && headers[1] == "目标", string.Join("|", headers.Take(6)));
-                Check("「目标运营商」排在第 3 列（保证不用横向滚动就能看到）",
-                    headers.Count > 2 && headers[2] == "目标运营商", string.Join("|", headers.Take(6)));
-                Check("「跨网」排在前 4 列",
-                    headers.Count > 3 && headers[3] == "跨网（是否跨运营商）", string.Join("|", headers.Take(6)));
-                Check("「本端出口（运营商）」排在前 5 列",
-                    headers.Count > 4 && headers[4] == "本端出口（运营商）", string.Join("|", headers.Take(6)));
+                var operatorStart = headers.IndexOf("目标运营商");
+                Check("「链路」「目标」仍在最前两列（测试主体）",
+                    headers.Count > 1 && headers[0] == "链路" && headers[1] == "目标",
+                    string.Join("|", headers.Take(4)));
+                Check("测试结果列排在运营商之前（平均RTT/发送丢包/状态/失败原因）",
+                    operatorStart > 0 &&
+                    headers.IndexOf("平均RTT") is > 0 and < int.MaxValue &&
+                    headers.IndexOf("平均RTT") < operatorStart &&
+                    headers.IndexOf("发送/丢包") < operatorStart &&
+                    headers.IndexOf("状态") < operatorStart &&
+                    headers.IndexOf("失败原因") < operatorStart,
+                    string.Join("|", headers));
+                Check("运营商相关的三列排在最后",
+                    headers.Count >= 3 &&
+                    headers[^3] == "目标运营商" && headers[^2] == "跨网" && headers[^1] == "本端出口（运营商）",
+                    string.Join("|", headers.TakeLast(3)));
 
-                var leadingWidth = statsGrid.Columns.Take(5).Sum(c => c.Width.DisplayValue);
-                Check("前 5 列（含全部运营商信息）能在默认窗口宽度内看全",
-                    leadingWidth <= 1360 - 40, $"前 5 列共 {leadingWidth:F0}px，窗口可用约 1320px");
+                // 整表宽度必须落在默认窗口内（默认 1360，去掉外边距与滚动条约 1300）
+                var tableWidth = statsGrid.Columns.Sum(c => c.Width.IsAbsolute ? c.Width.DisplayValue : c.MinWidth);
+                Check("统计表所有列能在默认窗口宽度内看全（不需要横向滚动）",
+                    tableWidth <= 1300, $"列宽合计 {tableWidth:F0}px（可用约 1300px）");
 
                 Check("统计表下方有一行运营商查询状态说明", window.FindName("IspNote") is TextBlock);
 
@@ -414,6 +423,9 @@ internal static partial class Program
                     Check("「本端出口（运营商）」把地址与运营商放在一格",
                         row.LocalExitText.Contains(" · ") && row.LocalExitText.Contains(row.LocalCarrier),
                         row.LocalExitText);
+                    Check("分位合并列形如 a/b/c",
+                        row.Percentiles == "-" || row.Percentiles.Split('/').Length == 3, row.Percentiles);
+                    Eq("发送/丢包合并列与两个原始字段一致", $"{row.Sent} / {row.Lost}", row.SentLost);
                     Check("查询状态行有内容（能回答为什么没显示）",
                         ((TextBlock)window.FindName("IspNote")!).Text.Contains("运营商信息："),
                         ((TextBlock)window.FindName("IspNote")!).Text);

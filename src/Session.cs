@@ -132,8 +132,10 @@ public sealed class StatSession
                 P50 = Format(Statistics.Percentile(valid, 0.50)),
                 P95 = Format(Statistics.Percentile(valid, 0.95)),
                 P99 = Format(Statistics.Percentile(valid, 0.99)),
+                Percentiles = DescribePercentiles(valid),
                 Sent = sent,
                 Lost = lost,
+                SentLost = $"{sent} / {lost}",
                 LossRate = $"{lossRate:F2}%",
                 ConsecutiveLoss = consecutive,
                 SeenFrom = LastSeenFrom(key) is { Length: > 0 } seen ? seen : "-",
@@ -148,4 +150,17 @@ public sealed class StatSession
     }
 
     private static string Format(double? value) => value.HasValue ? $"{value.Value:F1} ms" : "-";
+
+    /// <summary>
+    /// 「P50/P95/P99」合并成一格（例如 <c>0.8/1.2/3.4</c>）：三个独立列要占 220 多像素，
+    /// 而表格宽度有限——挤到最后一列看不见，等于没有。
+    /// </summary>
+    private static string DescribePercentiles(List<double> samples)
+    {
+        var p50 = Statistics.Percentile(samples, 0.50);
+        var p95 = Statistics.Percentile(samples, 0.95);
+        var p99 = Statistics.Percentile(samples, 0.99);
+
+        return p50 is null ? "-" : $"{p50.Value:F1}/{p95!.Value:F1}/{p99!.Value:F1}";
+    }
 }

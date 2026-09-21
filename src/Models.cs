@@ -451,6 +451,8 @@ public sealed class StatRow : INotifyPropertyChanged
     private string _p50 = "";
     private string _p95 = "";
     private string _p99 = "";
+    private string _percentiles = "";
+    private string _sentLost = "";
     private string _lossRate = "";
     private string _status = "";
     private string _seenFrom = "";
@@ -470,8 +472,15 @@ public sealed class StatRow : INotifyPropertyChanged
     public string P50 { get => _p50; set => Set(ref _p50, value); }
     public string P95 { get => _p95; set => Set(ref _p95, value); }
     public string P99 { get => _p99; set => Set(ref _p99, value); }
+
+    /// <summary>「P50/P95/P99」合并显示（例如 <c>0.8/1.2/3.4</c>），为的是把表宽压进一屏。</summary>
+    public string Percentiles { get => _percentiles; set => Set(ref _percentiles, value); }
+
     public int Sent { get => _sent; set => Set(ref _sent, value); }
     public int Lost { get => _lost; set => Set(ref _lost, value); }
+
+    /// <summary>「发送/丢包」合并显示（例如 <c>120 / 3</c>）。</summary>
+    public string SentLost { get => _sentLost; set => Set(ref _sentLost, value); }
     public string LossRate { get => _lossRate; set => Set(ref _lossRate, value); }
     public int ConsecutiveLoss { get => _consecutiveLoss; set => Set(ref _consecutiveLoss, value); }
     public string Status { get => _status; set => Set(ref _status, value); }
@@ -518,8 +527,10 @@ public sealed class StatRow : INotifyPropertyChanged
         P50 = other.P50;
         P95 = other.P95;
         P99 = other.P99;
+        Percentiles = other.Percentiles;
         Sent = other.Sent;
         Lost = other.Lost;
+        SentLost = other.SentLost;
         LossRate = other.LossRate;
         ConsecutiveLoss = other.ConsecutiveLoss;
         Status = other.Status;
