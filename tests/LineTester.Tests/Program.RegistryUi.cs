@@ -951,6 +951,101 @@ internal static partial class Program
         return null;
     }
 
+    // ---------------- 验收 A3 / A12 ----------------
+
+    /// <summary>
+    /// 两条"最容易做错"的验收：
+    /// A12 —— 中心勾掉「分发」后，该节点**继续心跳也不会把自己顶回来**（只是标记，不是删配置）；
+    /// A3 —— 在删除期间**离线**的节点，重新上线后同样拿不到那条链路（靠"全量快照"语义，
+    ///       如果客户端按差值合并就会复活已删链路）。
+    /// </summary>
+    private static async Task TestRegistryAcceptanceAsync()
+    {
+        Section("验收 A3 / A12：中心隐藏不被心跳顶回；离线期间被删的链路重连后也消失");
+
+        var root = Path.Combine(AppContext.BaseDirectory, ".testtmp", "accept_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        var port = FindBindablePort();
+        var store = new RegistryStore(Path.Combine(root, "registry.json"), 60);
+        var center = new RegistryCenterService(store, "preshared", 60);
+
+        using var server = new ProbeServer(port);
+        server.ProtocolHandler = center.HandleAsync;
+
+        try
+        {
+            server.Start();
+        }
+        catch
+        {
+            Check("验收用例节点启动", false, "端口不可绑定");
+            server.Dispose();
+            return;
+        }
+
+        var logDir = Path.Combine(root, "logs");
+
+        try
+        {
+            // ---- A12：勾掉「分发」以后，心跳不能把它顶回来 ----
+            var register = new RegisterMessage
+            {
+                NodeId = "b",
+                Name = "机房B",
+                Ip = "203.0.113.12",
+                Port = 50002,
+                Tcp = true,
+                Udp = true,
+                Instance = "inst-b"
+            };
+
+            Check("先让 B 进清单", store.Upsert(register, true).Accepted);
+            Eq("B 在快照里", 1, store.BuildSnapshot().Count);
+
+            Check("中心勾掉 B 的「分发」", store.SetCenterHidden("b", true));
+            Eq("勾掉后快照里没有 B（其他节点该链路消失）", 0, store.BuildSnapshot().Count);
+
+            for (var i = 0; i < 3; i++) store.Upsert(register, true);
+
+            Check("B 继续心跳不会把自己顶回分发",
+                store.Nodes.First(n => n.NodeId == "b").CenterHidden);
+            Eq("心跳后快照仍为空", 0, store.BuildSnapshot().Count);
+
+            Check("取消勾选后立即恢复", store.SetCenterHidden("b", false));
+            Eq("恢复后快照又有 B", 1, store.BuildSnapshot().Count);
+
+            // ---- A3：A 离线期间 B 被移除，A 重新上线后同样没有 B 的链路 ----
+            using (var nodeB = new RegistryTestNode("b", "203.0.113.12", 50002, port, "preshared", logDir))
+            {
+                var first = new RegistryTestNode("a", "203.0.113.11", 50001, port, "preshared", logDir);
+                try
+                {
+                    Check("A 首次注册成功", await first.Client.RegisterNowAsync(), first.Client.Status.LastError);
+                    Eq("A 先拿到 B 的链路", 1, first.Snapshot().Count);
+                }
+                finally
+                {
+                    first.Dispose(); // A 下线
+                }
+
+                Check("A 离线期间，中心移除 B", store.RemoveNode("b"));
+
+                // 重新上线：全新客户端（进程内 rev 从 0 开始），必须整体替换本地注册链路
+                using var again = new RegistryTestNode("a", "203.0.113.11", 50001, port, "preshared", logDir);
+                Check("A 重连注册成功", await again.Client.RegisterNowAsync(), again.Client.Status.LastError);
+                Eq("重连后 B 的链路同样消失（全量快照，不复活已删链路）", 0, again.Snapshot().Count);
+                Check("重连拿到的确实是全量快照（rev 变了）", again.Client.Status.Revision == store.Revision,
+                    $"客户端 rev={again.Client.Status.Revision}，中心 rev={store.Revision}");
+            }
+        }
+        finally
+        {
+            server.Dispose();
+            try { Directory.Delete(root, true); } catch { }
+        }
+    }
+
     // ---------------- 兼容矩阵逐行验证 ----------------
 
     /// <summary>

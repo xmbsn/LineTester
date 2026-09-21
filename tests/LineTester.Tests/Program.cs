@@ -54,6 +54,7 @@ internal static partial class Program
             TestRegistryCenter();
             await TestRegistryEndToEndAsync();
             await TestRegistryNonCenterAsync();
+            await TestRegistryAcceptanceAsync();
             TestRegistrarDraft();
             TestRegistryUiText();
             TestRegistryNodeRow();

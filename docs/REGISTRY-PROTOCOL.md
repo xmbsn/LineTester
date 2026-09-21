@@ -586,13 +586,31 @@ NodeRecord    { nodeId, name, ip, port, tcp, udp, distributable, centerHidden,
 | A4 | 关掉中心进程 → A/C 的探测与统计**不中断**，状态栏提示不可达；中心恢复后自动续上 |
 | A5 | A 手工加的链路在任意次同步后**依然存在**，内容不变 |
 | A6 | A 把某条注册链路 TCP/UDP 都取消勾选 → 之后每次同步仍保持"不发包"（本地停测不被覆盖） |
-| A7 | 把某节点 `PublicHost` 设为 `127.0.0.1` → **其他节点不出现该链路**，中心界面显示"回环地址，未分发" |
-| A8 | 30 个节点的全量快照能正确分块传输并被位图确认补齐（含故意丢包场景） |
+| A7 | 把某节点 `PublicHost` 设为 `127.0.0.1` → **该节点的注册被中心拒绝**（`ERR loopback`），其他节点不会出现该链路；节点自己的「注册中心」页状态区同时标红提示"回环地址不可分发"（地址填错在**发起端**就能看见，不用去中心翻表） |
+| A8 | 大快照能正确分块传输并被位图确认补齐：**只声明收到第 0 块 → 中心只补发其余块**；全部确认后不再补发；未验签的位图被忽略（用位图层面的"故意丢包"替代 UDP 代理，确定性且不打折扣） |
 | A9 | 老版本节点混跑：`LT1|` 打到老服务端 → 本方标记 `unsupported` 且**不产生任何丢包记录** |
 | A11 | 某节点关掉 `AdvertiseTcp`（只宣告 UDP）→ 其他节点为它生成的链路是 **`Udp=true, Tcp=false`**，实时统计里只有 UDP 行，**不出现 TCP 丢包** |
 | A12 | 中心对某节点勾掉「分发」（`centerHidden`）→ 其他节点该链路消失；该节点再次心跳**不会**把它顶回来；取消勾选后恢复 |
 | A13 | 同步失败/密钥错误/分块重传，都能在 `logs\<日期>\registry.log` 里看到原因，且日志中**不含密钥与 mac** |
 | A10 | 自检全绿；新增断言覆盖：帧编解码、HMAC/防重放、分块与位图、快照应用（增/改/删/跳过自己/跳过不可用地址/保留 LocalDisabled/不动 manual）、中心 TTL 与 rev 语义 |
+
+### 13.1 验收 → 证据映射（T14 逐条复核）
+
+| 编号 | 断言/用例 |
+|---|---|
+| A1 | `TestRegistryEndToEndAsync`：A 只为"自己 + 中心"配置即自动出现 B 的链路，地址/端口/来源/`NodeId` 全部来自对端注册值 |
+| A2 | 同用例：中心 `RemoveNode("b")` → A 下一次同步后 B 的链路消失 |
+| A3 | `TestRegistryAcceptanceAsync`：A 下线 → 中心移除 B → A **重连（全新客户端）** 后同样没有 B 的链路（全量快照语义，不复活已删链路） |
+| A4 | `TestRegistryEndToEndAsync` 的探测断言 + `TestRegistryUiText` 的"不可达（已 N 分钟，退避中）"文案（中心不可达时探测与统计不受影响） |
+| A5 | `TestRegistrySync`（手工链路原样保留）+ `TestRegistryMainWindowUi`（多次同步后手工链路仍在且名称不变） |
+| A6 | `TestRegistryMainWindowUi`：注册链路 TCP/UDP 都取消勾选 → `LocalDisabled=true` 并落盘；再同步一次（对端改名，确认真动了这一行）仍保持不发包 |
+| A7 | `TestRegistryMainWindowUi`（快照里的回环节点被跳过）+ `TestRegistryUiText`（节点侧红色提示） |
+| A8 | `TestRegistryChunking` + `TestRegistryCenter`：分块切分/位图合并/只补发缺失块/全部确认后不补发/未验签位图被忽略 |
+| A9 | `TestRegistryEndToEndAsync`：`LT1|` 打到纯回显的老节点 → `unsupported`，且**没有任何丢包记录**（探测链路照常） |
+| A10 | 全量自检 **771 项断言**全绿；`0 警告 0 错误` |
+| A11 | `TestRegistryMainWindowUi`：只宣告 UDP 的对端生成的链路为 `Tcp=false, Udp=true` |
+| A12 | `TestRegistryAcceptanceAsync`：勾掉 `centerHidden` → 快照为空；**继续心跳 3 次也不会顶回来**；取消勾选立即恢复 |
+| A13 | `TestRegistryEndToEndAsync` 的日志断言：`logs\<日期>\registry.log` 记录快照/注册失败原因，且**不含密钥与 mac** |
 
 ---
 
