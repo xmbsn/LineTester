@@ -271,6 +271,9 @@
                                 Click="SyncNow_Click" ToolTip="立刻拉取一次中心清单"/>
                         <Button x:Name="SaveRegistryButton" Style="{StaticResource RegButton}" Content="保存配置"
                                 Click="SaveRegistry_Click" ToolTip="校验并保存到 appsettings.json（与窗口底部的“保存配置”等价）"/>
+                        <Button x:Name="OpenLogsButton" Style="{StaticResource RegButton}" Content="打开日志目录"
+                                Click="OpenLogs_Click"
+                                ToolTip="打开 logs\日期\ 目录：registry-center.log（中心侧收发的每个注册/同步）、registry-client.log（本端注册与同步）、config.log（配置与链路改动）——排查问题时把这几份发出来即可"/>
                         <TextBlock Style="{StaticResource RegHint}" Margin="6,0,0,0" VerticalAlignment="Center"
                                    Text="注册同步随“启动测试”一起运行；运行时改这里的参数需重新“启动测试”"/>
                     </StackPanel>
@@ -296,7 +299,14 @@
                             <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="150"/>
                             <DataGridTextColumn Header="节点 ID" Binding="{Binding ShortId}" Width="74"
                                                 ToolTipService.ToolTip="节点身份前 8 位：同一台机器出现多行（历史遗留身份）时能一眼看出"/>
-                            <DataGridTextColumn Header="地址" Binding="{Binding Address}" Width="170"/>
+                            <DataGridTextColumn Header="地址" Binding="{Binding Address}" Width="176">
+                                <DataGridTextColumn.ElementStyle>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                                        <Setter Property="ToolTip" Value="{Binding AllAddresses}"/>
+                                    </Style>
+                                </DataGridTextColumn.ElementStyle>
+                            </DataGridTextColumn>
                             <DataGridTextColumn Header="协议" Binding="{Binding Protocols}" Width="96"/>
                             <DataGridTextColumn Header="最后心跳" Binding="{Binding LastSeen}" Width="160"/>
                             <DataGridTextColumn Header="状态" Binding="{Binding State}" Width="*" MinWidth="200"/>

@@ -88,7 +88,11 @@ public partial class MainWindow : Window
     /// <summary>链路编辑器最近一次改动的时刻（防抖用）；null = 没有待生效的改动。</summary>
     private DateTime? _linksDirtyUtc;
 
-    // ---- 注册中心（切片 3）----
+    /// <summary>链路配置与运行关键动作的日志（logs\日期\config.log）：改了什么、什么时候落盘、同步把哪些链路动了。</summary>
+    private readonly AppLog _configLog = new(Path.Combine(AppContext.BaseDirectory, "logs"), "config.log");
+
+    /// <summary>中心侧协议日志（logs\日期\registry-center.log）。</summary>
+    private readonly AppLog _centerLog = new(Path.Combine(AppContext.BaseDirectory, "logs"), "registry-center.log");
 
     private RegistryClient? _registryClient;
     private RegistryStore? _registryStore;
@@ -208,10 +212,24 @@ public partial class MainWindow : Window
         _settings = ConfigManager.Load(out var error);
         _configLoadError = error;
         _configStamp = ConfigManager.Stamp();
+
+        _configLog.Section($"加载配置 {ConfigManager.ConfigPath}");
+        if (error is not null) _configLog.Write($"  读取错误：{error}");
+        _configLog.Write($"  {_settings.Links.Count} 条链路，全局 TCP={_settings.EnableTcp} UDP={_settings.EnableUdp}，" +
+                         $"注册 Enabled={_settings.Registrar.Enabled} ServeAsCenter={_settings.Registrar.ServeAsCenter} " +
+                         $"节点名={_settings.Registrar.NodeName} 地址=[{string.Join(",", new[] { _settings.Registrar.PublicHost }.Concat(_settings.Registrar.PublicHosts ?? new List<string>()))}]");
+        foreach (var link in _settings.Links) _configLog.Write($"  {DescribeLink(link)}");
+
         ApplyConfigToUi(_settings);
         if (error is not null && showError) ShowConfigError(error);
         UpdateStatus();
     }
+
+    /// <summary>链路的一行日志描述（来源/协议/本地意图都写全，排障时能直接比对）。</summary>
+    private static string DescribeLink(LinkConfig link)
+        => $"链路「{link.Name}」{link.Host}:{link.Port} tcp={link.Tcp} udp={link.Udp} " +
+           $"source={link.Source} nodeId={(link.NodeId.Length > 8 ? link.NodeId[..8] : link.NodeId)} " +
+           $"localDisabled={link.LocalDisabled} localTcpOff={link.LocalTcpOff} localUdpOff={link.LocalUdpOff}";
 
     private void ShowConfigError(string error)
     {
@@ -516,6 +534,7 @@ public partial class MainWindow : Window
         RevalidateLinks();
         SelectAndFocus(row);
         UpdateStatus("已新增一条链路，请填写名称与主机/IP（点“启动测试”后生效）");
+        _configLog.Write($"新增链路：「{row.Name}」{row.Target}");
     }
 
     private void DuplicateLink_Click(object sender, RoutedEventArgs e)
@@ -554,7 +573,6 @@ public partial class MainWindow : Window
             _alert("请先在列表里选中要删除的链路。", "删除链路");
             return;
         }
-
         // 注册链路不能在这里删：本地删掉只会在下一个同步周期被中心加回来（假成功）
         var registryRows = selected.Where(r => r.IsRegistry).ToList();
         if (registryRows.Count > 0)
@@ -585,6 +603,9 @@ public partial class MainWindow : Window
         }
         _lastDeleted.Sort(static (a, b) => a.Index.CompareTo(b.Index));
 
+        _configLog.Write($"删除链路 {selected.Count} 条：" +
+                         string.Join("；", selected.Select(r => $"「{r.Name}」{r.Target}({r.SourceText})")));
+
         UpdateUndoButton();
         RevalidateLinks();
         UpdateStatus($"已删除 {selected.Count} 条链路（可点“撤销删除”恢复；点“启动测试”后生效）");
@@ -605,6 +626,7 @@ public partial class MainWindow : Window
         UpdateUndoButton();
         RevalidateLinks();
         UpdateStatus($"已恢复 {count} 条被删除的链路（点“启动测试”后生效）");
+        _configLog.Write($"撤销删除：恢复 {count} 条链路");
     }
 
     private bool ReadUiToConfig()
@@ -672,6 +694,13 @@ public partial class MainWindow : Window
             _configLoadError = null;
             _savedLinksSignature = LinksSignature();
             UpdateLinkSummary();
+
+            _configLog.Write($"保存配置成功 → {ConfigManager.ConfigPath}（{_settings.Links.Count} 条链路）");
+            foreach (var link in _settings.Links)
+            {
+                _configLog.Write($"  {DescribeLink(link)}");
+            }
+
             return true;
         }
         catch (Exception ex)
@@ -792,8 +821,17 @@ public partial class MainWindow : Window
             {
                 var store = EnsureRegistryStore();
                 _registryCenter = new RegistryCenterService(
-                    store, _settings.Registrar.Secret, _settings.Registrar.HeartbeatSeconds);
+                    store, _settings.Registrar.Secret, _settings.Registrar.HeartbeatSeconds, null, _centerLog);
                 server.ProtocolHandler = _registryCenter.HandleAsync;
+
+                _centerLog.Section($"中心启动：清单 {store.Nodes.Count} 个节点，密钥 {AppLog.Redact(_settings.Registrar.Secret)}");
+                foreach (var node in store.Nodes)
+                {
+                    _centerLog.Write($"  已有节点 {node.Name} [{node.NodeId[..Math.Min(8, node.NodeId.Length)]}] " +
+                                     $"地址=[{string.Join(",", node.Ips.Count > 0 ? node.Ips : new List<string> { node.Ip })}] " +
+                                     $"port={node.Port} tcp={node.Tcp} udp={node.Udp} online={node.Online} lastSeen={node.LastSeenUtc:u}");
+                }
+
                 notes.Add($"本机同时是注册中心：清单 {store.Nodes.Count} 个节点");
             }
             else
@@ -1038,6 +1076,13 @@ public partial class MainWindow : Window
 
         SyncRegistryRows(outcome.Links);
 
+        _configLog.Write($"应用中心快照：新增 {outcome.Added}、更新 {outcome.Updated}、删除 {outcome.Removed}、" +
+                         $"跳过不可用地址 {outcome.SkippedUnusable}（中心 rev={_registryClient?.Status.Revision}）");
+        foreach (var link in outcome.Links.Where(l => l.Source == LinkSources.Registry))
+        {
+            _configLog.Write($"  {DescribeLink(link)}");
+        }
+
         // 交给防抖统一重建生效链路：它从"编辑器里的行"取数，
         // 因此既包含刚同步下来的注册链路，也不会丢掉用户尚未保存的手工改动。
         _linksDirtyUtc = DateTime.UtcNow;
@@ -1121,11 +1166,14 @@ public partial class MainWindow : Window
             ConfigManager.Save(_settings);
             _configStamp = ConfigManager.Stamp();
             _savedLinksSignature = LinksSignatureOf(_settings.Links);
+
+            _configLog.Write($"注册同步自动落盘成功（{_settings.Links.Count} 条链路）→ {ConfigManager.ConfigPath}");
             return true;
         }
         catch (Exception ex)
         {
             error = ex.Message;
+            _configLog.Write($"注册同步自动落盘失败：{ex.Message}");
             return false;
         }
     }

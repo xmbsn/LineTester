@@ -26,7 +26,8 @@ public sealed class RegistryNodeRow : INotifyPropertyChanged
     private RegistryNodeRow(
         string nodeId, string name, string address, string protocols, string lastSeen,
         bool online, bool distributable, bool authenticated, bool duplicateSuspected,
-        bool centerHidden, bool removed, Func<string, bool, bool> setCenterHidden, bool longOffline = false)
+        bool centerHidden, bool removed, Func<string, bool, bool> setCenterHidden,
+        bool longOffline = false, string allAddresses = "")
     {
         _setCenterHidden = setCenterHidden;
 
@@ -35,6 +36,7 @@ public sealed class RegistryNodeRow : INotifyPropertyChanged
         Address = address;
         Protocols = protocols;
         LastSeen = lastSeen;
+        AllAddresses = allAddresses.Length > 0 ? allAddresses : address;
 
         _online = online;
         _distributable = distributable;
@@ -47,18 +49,33 @@ public sealed class RegistryNodeRow : INotifyPropertyChanged
 
     /// <param name="setCenterHidden">参数为 (nodeId, hidden)，返回是否真的改动了中心清单。</param>
     public static RegistryNodeRow FromNode(RegistryNode node, DateTime nowUtc, Func<string, bool, bool> setCenterHidden)
-        => new(
+    {
+        var addresses = node.Ips is { Count: > 0 }
+            ? node.Ips
+            : new List<string> { node.Ip };
+
+        // 一个机房多个外网 IP 时，**必须都显示出来**——曾经只显示主地址，
+        // 现场看到的就成了"我注册了 3 个 IP，中心界面只有 1 个"。
+        var primary = string.IsNullOrWhiteSpace(node.Ip) ? "（未提供，不分发）" : $"{node.Ip}:{node.Port}";
+        var shown = addresses.Count > 1
+            ? $"{primary}  等 {addresses.Count} 个"
+            : primary;
+
+        var all = string.Join("、", addresses.Select(ip => $"{ip}:{node.Port}"));
+
+        return new RegistryNodeRow(
             node.NodeId,
             string.IsNullOrWhiteSpace(node.Name) ? node.NodeId : node.Name,
-            // 不参与网状的节点地址本来就是空的：显示成"-"比 ":0" 诚实
-            string.IsNullOrWhiteSpace(node.Ip) ? "（未提供，不分发）" : $"{node.Ip}:{node.Port}",
+            shown,
             RegistryUiText.DescribeProtocols(node.Tcp, node.Udp),
             RegistryUiText.DescribeLastSeen(node.LastSeenUtc, nowUtc),
             node.Online, node.Distributable, node.Authenticated, node.DuplicateSuspected, node.CenterHidden, false,
             setCenterHidden,
             // 长期离线（>7 天没有心跳）：这些行往往已经不会再回来，却会让所有节点一直维持到它的链路。
             // 判据只看"多久没心跳"，不依赖 Online 标志——那个标志要等中心刷新才会更新。
-            nowUtc - node.LastSeenUtc > TimeSpan.FromDays(7));
+            nowUtc - node.LastSeenUtc > TimeSpan.FromDays(7),
+            all);
+    }
 
     /// <summary>已被中心移除、仍在移除名单里的节点。</summary>
     public static RegistryNodeRow FromRemoved(string nodeId, Func<string, bool, bool> setCenterHidden)
@@ -67,7 +84,13 @@ public sealed class RegistryNodeRow : INotifyPropertyChanged
 
     public string NodeId { get; }
     public string Name { get; }
+
+    /// <summary>地址列显示文本：多地址时显示主地址并注明总数。</summary>
     public string Address { get; }
+
+    /// <summary>全部地址（含端口），用于提示框——一眼确认 3 个 IP 都注册上来了。</summary>
+    public string AllAddresses { get; }
+
     public string Protocols { get; }
     public string LastSeen { get; }
 

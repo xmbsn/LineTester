@@ -717,9 +717,9 @@ internal static partial class Program
 
             // ---- 协议日志 ----
             var logFiles = Directory.Exists(logDir)
-                ? Directory.GetFiles(logDir, "registry.log", SearchOption.AllDirectories)
+                ? Directory.GetFiles(logDir, "registry-client.log", SearchOption.AllDirectories)
                 : Array.Empty<string>();
-            Check("写入按天目录下的 registry.log", logFiles.Length > 0, logDir);
+            Check("写入按天目录下的 registry-client.log", logFiles.Length > 0, logDir);
 
             if (logFiles.Length > 0)
             {

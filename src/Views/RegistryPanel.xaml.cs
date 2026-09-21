@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -326,6 +327,26 @@ public partial class RegistryPanel : UserControl
     private void SyncNow_Click(object sender, RoutedEventArgs e) => RegisterRequested?.Invoke();
 
     private void SaveRegistry_Click(object sender, RoutedEventArgs e) => SaveRequested?.Invoke();
+
+    /// <summary>打开日志目录（按天分目录的那一层）：排查问题时把里面的文件发出来即可。</summary>
+    private void OpenLogs_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var directory = Path.Combine(AppContext.BaseDirectory, "logs", CsvLogWriter.FolderNameFor(DateTime.Now));
+            Directory.CreateDirectory(directory);
+
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = directory,
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            Alert("打开日志目录失败：" + ex.Message, "打开失败");
+        }
+    }
 
     private void RemoveNode_Click(object sender, RoutedEventArgs e)
     {

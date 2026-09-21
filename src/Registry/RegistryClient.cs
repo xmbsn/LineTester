@@ -67,7 +67,6 @@ public sealed class RegistryClient : IDisposable
     private readonly RegistryClientOptions _options;
     private readonly CancellationTokenSource _cts = new();
     private readonly string _instanceId = Guid.NewGuid().ToString("N");
-    private readonly object _logLock = new();
 
     /// <summary>
     /// 请求闸门：本类**只用一个 socket**，因此同一时刻只能有一个请求在等应答。
@@ -75,6 +74,9 @@ public sealed class RegistryClient : IDisposable
     /// 表现为间歇性"中心无应答"——实测踩过。
     /// </summary>
     private readonly SemaphoreSlim _requestGate = new(1, 1);
+
+    /// <summary>协议日志（按天分目录）。写成一行行事件，现场排查时能看出"谁在什么时候做了什么"。</summary>
+    private readonly AppLog? _log;
 
     private UdpClient? _socket;
     private IPEndPoint? _center;
@@ -88,6 +90,9 @@ public sealed class RegistryClient : IDisposable
     {
         _options = options;
         _backoffMs = Math.Max(200, options.RetryMs);
+        _log = options.LogDirectory.Length == 0
+            ? null
+            : new AppLog(options.LogDirectory, "registry-client.log");
     }
 
     /// <summary>收到中心快照（<c>changed=true</c> 时触发）。订阅方负责套用到本地链路并保存配置。</summary>
@@ -534,25 +539,7 @@ public sealed class RegistryClient : IDisposable
     private void Log(string message)
     {
         Status.LastLogLine = message;
-
-        if (_options.LogDirectory.Length == 0) return;
-
-        try
-        {
-            lock (_logLock)
-            {
-                var directory = Path.Combine(_options.LogDirectory, CsvLogWriter.FolderNameFor(DateTime.Now));
-                Directory.CreateDirectory(directory);
-                File.AppendAllText(
-                    Path.Combine(directory, "registry.log"),
-                    $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {message}{Environment.NewLine}",
-                    new UTF8Encoding(false));
-            }
-        }
-        catch
-        {
-            // 日志写不进去不影响同步
-        }
+        _log?.Write(message);
     }
 
     public void Dispose()
@@ -560,5 +547,6 @@ public sealed class RegistryClient : IDisposable
         Stop();
         try { _cts.Dispose(); } catch { }
         try { _requestGate.Dispose(); } catch { }
+        try { _log?.Dispose(); } catch { }
     }
 }

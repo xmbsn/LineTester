@@ -1420,6 +1420,189 @@ internal static partial class Program
         try { Directory.Delete(root, true); } catch { }
     }
 
+    // ---------------- 现场排查：日志 + 中心表格多地址显示 ----------------
+
+    /// <summary>
+    /// 现场反馈两件事：
+    /// ① 东莞机房注册了 3 个 IP，但中心界面只显示 1 个 → 中心表只显示主地址（漏显示）；
+    /// ② 需要把注册/同步/链路配置的日志写到文件，便于两端对照排查。
+    /// </summary>
+    private static async Task TestRegistryDiagnosticsAsync()
+    {
+        Section("现场排查：多地址在中心表显示 + 注册/同步/配置日志落盘");
+
+        var root = Path.Combine(AppContext.BaseDirectory, ".testtmp", "diag_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        // ---- ① 中心表：3 个地址都要能被看到 ----
+        var store = new RegistryStore(Path.Combine(root, "registry.json"), 60);
+        store.Upsert(new RegisterMessage
+        {
+            NodeId = "dg-node-1234",
+            Name = "东莞机房",
+            Ip = "120.233.128.228",
+            Port = 16298,
+            Tcp = true,
+            Udp = true,
+            Ips = new List<string> { "120.233.128.228", "157.255.153.208", "183.60.150.36" }
+        }, true);
+
+        var node = store.Nodes.First(n => n.NodeId == "dg-node-1234");
+        var row = RegistryNodeRow.FromNode(node, DateTime.UtcNow, (_, _) => true);
+
+        Check("中心表地址列注明还有更多地址（不再只显示主地址）",
+            row.Address.Contains("120.233.128.228:16298") && row.Address.Contains("等 3 个"), row.Address);
+        Check("提示框里列出全部 3 个地址",
+            row.AllAddresses.Contains("120.233.128.228:16298") &&
+            row.AllAddresses.Contains("157.255.153.208:16298") &&
+            row.AllAddresses.Contains("183.60.150.36:16298"),
+            row.AllAddresses);
+
+        var singleRow = RegistryNodeRow.FromNode(
+            new RegistryNode { NodeId = "one", Name = "单地址", Ip = "203.0.113.9", Port = 9000, Ips = new List<string> { "203.0.113.9" } },
+            DateTime.UtcNow, (_, _) => true);
+        Check("单地址节点不显示“等 N 个”", !singleRow.Address.Contains("等"), singleRow.Address);
+        Eq("单地址节点提示框内容与地址列一致", "203.0.113.9:9000", singleRow.AllAddresses);
+
+        // ---- ② 日志：中心侧把每个 REG 的地址与结论写下来 ----
+        var logsDir = Path.Combine(root, "logs");
+        var centerLog = new AppLog(logsDir, "registry-center.log", () => new DateTime(2026, 9, 21, 15, 0, 0));
+        var centerStore = new RegistryStore(Path.Combine(root, "center-registry.json"), 60);
+        var center = new RegistryCenterService(centerStore, "secret-should-never-appear",
+            60, () => DateTime.UtcNow, centerLog);
+
+        var registerFrame = RegistryProtocol.EncodeSigned("secret-should-never-appear", RegistryProtocol.TypeRegister,
+            RegistryProtocol.Serialize(new RegisterMessage
+            {
+                ReqId = "req-log-1",
+                NodeId = "dg-node-1234",
+                Name = "东莞机房",
+                Ip = "120.233.128.228",
+                Port = 16298,
+                Tcp = true,
+                Udp = true,
+                Ips = new List<string> { "120.233.128.228", "157.255.153.208", "183.60.150.36" },
+                Ts = RegistryAuth.NowUnixSeconds(),
+                Nonce = RegistryAuth.NewNonce()
+            }));
+
+        await center.HandleAsync(registerFrame, registerFrame.Length, new IPEndPoint(IPAddress.Loopback, 5000), CancellationToken.None);
+
+        var centerLogText = File.ReadAllText(centerLog.CurrentPath);
+        Check("中心日志记录了 REG 成功", centerLogText.Contains("REG 成功"), centerLogText.Split('\n').LastOrDefault());
+        Check("中心日志记录了全部 3 个地址",
+            centerLogText.Contains("120.233.128.228") && centerLogText.Contains("157.255.153.208") &&
+            centerLogText.Contains("183.60.150.36"), centerLogText);
+        Check("中心日志记录了节点名与端口", centerLogText.Contains("东莞机房") && centerLogText.Contains("port=16298"));
+        Check("中心日志记录了 rev 变化与清单规模",
+            centerLogText.Contains("rev 0→1") && centerLogText.Contains("清单 1 个节点"), centerLogText);
+        Check("中心日志**不含密钥**", !centerLogText.Contains("secret-should-never-appear"));
+
+        // 被拒的注册也要记（现场最常见的"注册不上"）
+        var badFrame = RegistryProtocol.EncodeSigned("secret-should-never-appear", RegistryProtocol.TypeRegister,
+            RegistryProtocol.Serialize(new RegisterMessage
+            {
+                ReqId = "req-log-2", NodeId = "bad-node", Name = "坏地址", Ip = "127.0.0.1", Port = 9000,
+                Ts = RegistryAuth.NowUnixSeconds(), Nonce = RegistryAuth.NewNonce()
+            }));
+
+        await center.HandleAsync(badFrame, badFrame.Length, new IPEndPoint(IPAddress.Loopback, 5001), CancellationToken.None);
+        var afterReject = File.ReadAllText(centerLog.CurrentPath);
+        Check("被拒的注册也写进日志（含拒绝原因）",
+            afterReject.Contains("REG 被拒") && afterReject.Contains("loopback"), afterReject);
+
+        // 客户端日志（非中心侧）
+        var clientLogRoot = Path.Combine(root, "client-logs");
+        var clientPort = FindBindablePort();
+        var clientStore = new RegistryStore(Path.Combine(root, "client-registry.json"), 60);
+        var clientCenter = new RegistryCenterService(clientStore, "s", 60, () => DateTime.UtcNow, centerLog);
+        using var server = new ProbeServer(clientPort);
+        server.ProtocolHandler = clientCenter.HandleAsync;
+        server.Start();
+
+        using var client = new RegistryClient(new RegistryClientOptions
+        {
+            NodeId = "client-node",
+            NodeName = "非中心节点",
+            PublicHost = "203.0.113.9",
+            PublicPort = 16298,
+            Ips = new List<string> { "203.0.113.9", "203.0.113.10" },
+            CenterHost = "127.0.0.1",
+            CenterPort = clientPort,
+            Secret = "s",
+            RetryMs = 200,
+            MaxRetries = 1,
+            LogDirectory = clientLogRoot
+        });
+
+        Check("客户端启动", client.Start());
+        Check("客户端注册成功", await client.RegisterNowAsync(), client.Status.LastError);
+
+        var clientLogPath = Path.Combine(clientLogRoot, CsvLogWriter.FolderNameFor(DateTime.Now), "registry-client.log");
+        Check("非中心侧日志已生成", File.Exists(clientLogPath), clientLogPath);
+        var clientLogText = File.ReadAllText(clientLogPath);
+        Check("客户端日志记录了启动与本端地址",
+            clientLogText.Contains("启动同步") && clientLogText.Contains("203.0.113.9:16298"), clientLogText);
+        Check("客户端日志记录了收到的清单快照", clientLogText.Contains("收到清单快照"), clientLogText);
+
+        client.Stop();
+        server.Dispose();
+
+        // ---- ③ 链路配置日志（改了什么、删了什么都要留痕） ----
+        RunOnSta(() =>
+        {
+            var configRoot = Path.Combine(root, "cfg");
+            Directory.CreateDirectory(configRoot);
+
+            var previousOverride = ConfigManager.OverridePath;
+            ConfigManager.OverridePath = Path.Combine(configRoot, "appsettings.json");
+
+            try
+            {
+                ConfigManager.Save(new AppConfig
+                {
+                    Links =
+                    {
+                        new LinkConfig { Name = "文一西路", Host = "115.231.111.101", Port = 16298 },
+                        new LinkConfig { Name = "东莞机房", Host = "120.233.128.228", Port = 16298 }
+                    }
+                });
+
+                var window = new MainWindow();
+                var rows = (System.Collections.IList)GetPrivateField(window, "_linkRows")!;
+
+                var grid = (DataGrid)window.FindName("LinksGrid")!;
+                grid.SelectedItems.Clear();
+                grid.SelectedItems.Add(rows.Cast<LinkRow>().First(r => r.Name == "东莞机房"));
+                SetPrivateField(window, "_confirmDelete", (Func<string, string, bool>)((_, _) => true));
+                SetPrivateField(window, "_alert", (Action<string, string>)((_, _) => { }));
+                InvokePrivateHandler(window, "DeleteLink_Click");
+
+                var keep = rows.Cast<LinkRow>().First(r => r.Name == "文一西路");
+                keep.Tcp = false;
+                InvokePrivateHandler(window, "SaveConfig_Click");
+                window.Close();
+
+                var configLog = (AppLog)GetPrivateField(new MainWindow(), "_configLog")!;
+                var configLogPath = Path.Combine(AppContext.BaseDirectory, "logs", CsvLogWriter.FolderNameFor(DateTime.Now), "config.log");
+                Check("链路配置日志文件已生成", File.Exists(configLogPath), configLogPath);
+
+                var text = File.ReadAllText(configLogPath);
+                Check("配置日志记录了加载配置与链路明细",
+                    text.Contains("加载配置") && text.Contains("链路「文一西路」115.231.111.101:16298"), text);
+                Check("配置日志记录了删除动作", text.Contains("删除链路 1 条") && text.Contains("东莞机房"), text);
+                Check("配置日志记录了保存后的链路状态（TCP 与本地意图）",
+                    text.Contains("tcp=False"), text);
+            }
+            finally
+            {
+                ConfigManager.OverridePath = previousOverride;
+            }
+        }, "链路配置日志断言");
+
+        try { Directory.Delete(root, true); } catch { }
+    }
+
     // ---------------- 一机房多 IP ----------------
 
     /// <summary>

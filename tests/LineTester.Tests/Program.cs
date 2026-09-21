@@ -75,6 +75,7 @@ internal static partial class Program
             TestRegistryPanelUi();
             TestRegistryMainWindowUi();
             TestRegistryLocalProtocolIntent();
+            await TestRegistryDiagnosticsAsync();
             TestRegistryMultiAddress();
             TestSaveAndRestartRoundTrip();
             TestNodeNameHeader();

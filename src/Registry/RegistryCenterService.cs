@@ -35,6 +35,7 @@ public sealed class RegistryCenterService
     private readonly string _secret;
     private readonly int _heartbeatSeconds;
     private readonly Func<DateTime> _clock;
+    private readonly AppLog? _log;
 
     private readonly NonceCache _nonces = new(256);
     private readonly Dictionary<string, IReadOnlyList<byte[]>> _idempotent = new(StringComparer.Ordinal);
@@ -42,12 +43,14 @@ public sealed class RegistryCenterService
     private readonly Dictionary<string, OutgoingTransfer> _transfers = new(StringComparer.Ordinal);
     private readonly Dictionary<string, RateWindow> _rates = new(StringComparer.Ordinal);
 
-    public RegistryCenterService(RegistryStore store, string secret, int heartbeatSeconds, Func<DateTime>? clock = null)
+    public RegistryCenterService(
+        RegistryStore store, string secret, int heartbeatSeconds, Func<DateTime>? clock = null, AppLog? log = null)
     {
         _store = store;
         _secret = secret ?? "";
         _heartbeatSeconds = heartbeatSeconds > 0 ? heartbeatSeconds : 60;
         _clock = clock ?? (() => DateTime.UtcNow);
+        _log = log;
     }
 
     /// <summary>已认证（配置了密钥）时清单里标记 authenticated。</summary>
@@ -89,6 +92,7 @@ public sealed class RegistryCenterService
 
         if (!Allow(remote, type))
         {
+            _log?.Write($"限流丢弃：{type} 来自 {remote}（超过每秒上限）");
             return Reply(new ErrorMessage
             {
                 Code = RegistryErrorCodes.Throttled,
@@ -124,9 +128,15 @@ public sealed class RegistryCenterService
 
         if (string.IsNullOrWhiteSpace(message.NodeId)) return BadRequest(message.ReqId, "缺少 nodeId");
 
+        var addresses = message.AllIps;
+        var beforeRevision = _store.Revision;
+
         var result = _store.Upsert(message, UsesSecret);
         if (!result.Accepted)
         {
+            _log?.Write($"REG 被拒 nodeId={Short(message.NodeId)} name={message.Name} 地址=[{string.Join(",", addresses)}] " +
+                        $"port={message.Port} tcp={message.Tcp} udp={message.Udp} → {result.ErrorCode}：{result.ErrorMessage}");
+
             return Reply(new ErrorMessage
             {
                 ReqId = message.ReqId,
@@ -134,6 +144,11 @@ public sealed class RegistryCenterService
                 Message = result.ErrorMessage
             });
         }
+
+        _log?.Write($"REG 成功 nodeId={Short(message.NodeId)} name={message.Name} " +
+                    $"地址=[{string.Join(",", addresses)}] port={message.Port} tcp={message.Tcp} udp={message.Udp} " +
+                    $"distributable={message.Distributable} rev {beforeRevision}→{_store.Revision} 清单 {_store.Nodes.Count} 个节点" +
+                    (message.Distributable && addresses.Count > 1 ? $"（多地址：会给每个地址各生成一条链路）" : ""));
 
         var replies = BuildAck(message.ReqId, message.Rev, remote);
         CacheReply(message.ReqId, replies);
@@ -154,9 +169,17 @@ public sealed class RegistryCenterService
         }
 
         var replies = BuildAck(message.ReqId, message.Since, remote);
+
+        _log?.Write($"SYNC nodeId={Short(message.NodeId)} since={message.Since} " +
+                    $"中心 rev={_store.Revision} 清单 {_store.Nodes.Count} 个节点 → " +
+                    (message.Since == _store.Revision ? "无变化（短路应答）" : "下发完整快照"));
+
         CacheReply(message.ReqId, replies);
         return replies;
     }
+
+    private static string Short(string nodeId)
+        => nodeId.Length <= 8 ? nodeId : nodeId[..8];
 
     /// <summary>认证链：签名 → 时间窗 → nonce 唯一性。任何一步失败都回 ERR 并说明原因。</summary>
     private bool Authorize(
