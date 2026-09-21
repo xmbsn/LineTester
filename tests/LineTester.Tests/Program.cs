@@ -39,6 +39,12 @@ internal static partial class Program
             return await IspLiveAsync(args.Skip(1).ToArray());
         }
 
+        // 用真实窗口加载一份配置文件，打印界面上的链路情况（"文件里有、界面里没有"的排查）
+        if (args.Length >= 2 && args[0] == "--links")
+        {
+            return DumpLinks(args[1]);
+        }
+
         // 用真实窗口 + 真实接口复现"统计表里的运营商显示"（可加 --poison 预置坏缓存）
         if (args.Length >= 3 && args[0] == "--isp-window" &&
             int.TryParse(args[2], out var ispPort))
@@ -76,6 +82,7 @@ internal static partial class Program
             TestRegistryMainWindowUi();
             TestRegistryLocalProtocolIntent();
             await TestRegistryDiagnosticsAsync();
+            TestRegistryRowsKeepAllAddresses();
             TestRegistryMultiAddress();
             TestSaveAndRestartRoundTrip();
             TestNodeNameHeader();

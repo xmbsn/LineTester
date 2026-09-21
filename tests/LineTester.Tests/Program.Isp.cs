@@ -799,6 +799,74 @@ internal static partial class Program
         try { Directory.Delete(root, true); } catch { }
     }
 
+    /// <summary>
+    /// 人工排查用：把一份配置文件加载进真实窗口，打印界面上到底有几条链路、
+    /// 每条是否合法、表格可见高度能放下几行。
+    /// 用法：<c>LineTester.Tests.exe --links &lt;appsettings.json 路径&gt;</c>
+    /// </summary>
+    private static int DumpLinks(string configPath)
+    {
+        Console.WriteLine($"用真实窗口加载配置文件：{configPath}");
+        Console.WriteLine(new string('-', 64));
+
+        if (!File.Exists(configPath))
+        {
+            Console.WriteLine("文件不存在");
+            return 1;
+        }
+
+        var previous = ConfigManager.OverridePath;
+        ConfigManager.OverridePath = configPath;
+
+        try
+        {
+            var loaded = ConfigManager.Load(out var loadError);
+            Console.WriteLine($"文件里 {loaded.Links.Count} 条链路；读取错误={loadError ?? "无"}");
+            Console.WriteLine($"注册段：Enabled={loaded.Registrar.Enabled} ServeAsCenter={loaded.Registrar.ServeAsCenter} " +
+                              $"节点名={loaded.Registrar.NodeName} " +
+                              $"地址=[{string.Join(",", new[] { loaded.Registrar.PublicHost }.Concat(loaded.Registrar.PublicHosts ?? new List<string>()))}] " +
+                              $"端口={loaded.Registrar.PublicPort} 密钥={AppLog.Redact(loaded.Registrar.Secret)}");
+            Console.WriteLine();
+
+            RunOnSta(() =>
+            {
+                var window = new MainWindow();
+                Pump(600);
+
+                var rows = (System.Collections.IList)GetPrivateField(window, "_linkRows")!;
+                var grid = (DataGrid)window.FindName("LinksGrid")!;
+                var summary = (TextBlock)window.FindName("LinkSummary")!;
+
+                Console.WriteLine($"界面行数：{rows.Count}");
+                foreach (var item in rows)
+                {
+                    var row = (LinkRow)item;
+                    Console.WriteLine($"  「{row.Name}」{row.Host}:{row.PortText} tcp={row.Tcp} udp={row.Udp} " +
+                                      $"source={row.SourceText} 有效={row.IsValid} 校验={row.Problem}");
+                }
+
+                Console.WriteLine();
+                Console.WriteLine($"表格 Items 数：{grid.Items.Count}");
+                Console.WriteLine($"表格可见高度：{grid.ActualHeight:F0}px，行高 {grid.RowHeight:F0}px " +
+                                  $"→ 约可见 {grid.ActualHeight / Math.Max(1, grid.RowHeight):F1} 行");
+                Console.WriteLine($"窗口尺寸：{window.Width:F0}×{window.Height:F0}");
+                Console.WriteLine("摘要：" + summary.Text);
+
+                // 文件 ↔ 界面 的核对
+                var diff = LinkConfigDiff.Compare(loaded.Links, rows.Cast<LinkRow>().Select(r => r.ToConfig()));
+                Console.WriteLine($"核对：文件 {diff.FileCount} 条 / 界面 {diff.RowCount} 条，一致={diff.Same}");
+
+                window.Close();
+            }, "加载配置复现");
+        }
+        finally
+        {
+            ConfigManager.OverridePath = previous;
+        }
+
+        return 0;
+    }
+
     /// <summary>假抓取器：记录收到的批量请求，按需返回预设结果。</summary>
     private sealed class FakeFetcher : IIspFetcher
     {

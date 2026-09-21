@@ -461,7 +461,31 @@ public partial class MainWindow : Window
         if (_linkRows.Count == 0)
             parts.Add("没有链路时程序只监听应答，不主动发包");
 
+        // 注册链路按来源机房分组：一眼看出"某个机房有几个 IP 各占一条链路"
+        var registryGroups = _linkRows
+            .Where(r => r.IsRegistry && r.Name.Trim().Length > 0)
+            .GroupBy(r => BaseLinkName(r.Name), StringComparer.Ordinal)
+            .Select(g => (Name: g.Key, Count: g.Count()))
+            .Where(g => g.Count > 1)
+            .ToList();
+
+        if (registryGroups.Count > 0)
+        {
+            parts.Add("注册机房多 IP：" + string.Join("、",
+                registryGroups.Select(g => $"{g.Name} ×{g.Count}")));
+        }
+
         LinkSummary.Text = string.Join(" · ", parts);
+    }
+
+    /// <summary>把链路名里的 <c>#2/#3</c> 后缀去掉，得到来源机房名（同一机房的多条链路归到一组）。</summary>
+    private static string BaseLinkName(string name)
+    {
+        var index = name.LastIndexOf('#');
+        if (index <= 0) return name.Trim();
+
+        var tail = name[(index + 1)..].Trim();
+        return tail.Length > 0 && tail.All(char.IsAsciiDigit) ? name[..index].Trim() : name.Trim();
     }
 
     private void UpdateUndoButton()
@@ -627,6 +651,31 @@ public partial class MainWindow : Window
         RevalidateLinks();
         UpdateStatus($"已恢复 {count} 条被删除的链路（点“启动测试”后生效）");
         _configLog.Write($"撤销删除：恢复 {count} 条链路");
+    }
+
+    /// <summary>
+    /// 「核对配置文件」：把磁盘上的配置与界面上的行逐条对比并说明差异。
+    ///
+    /// 现场多次出现"appsettings.json 里明明有 N 条链路，界面里只有 M 条"，
+    /// 而原因可能是程序读的不是这份文件、文件被外部改过、或同步/删除动过它——
+    /// 光看界面分不清，所以让它自己说清楚。
+    /// </summary>
+    private void CheckConfig_Click(object sender, RoutedEventArgs e)
+    {
+        var file = ConfigManager.Load(out var error);
+        var stamp = ConfigManager.Stamp();
+
+        var diff = LinkConfigDiff.Compare(file.Links, _linkRows.Select(r => r.ToConfig()));
+        var text = LinkConfigDiff.Describe(diff, ConfigManager.ConfigPath, stamp?.WriteUtc.ToLocalTime());
+
+        if (error is not null) text = "（配置文件读取失败：" + error + "）\n\n" + text;
+
+        MessageBox.Show(text, "核对配置文件", MessageBoxButton.OK,
+            diff.Same ? MessageBoxImage.Information : MessageBoxImage.Warning);
+
+        _configLog.Write($"核对配置文件：文件 {diff.FileCount} 条 / 界面 {diff.RowCount} 条，一致={diff.Same}" +
+                         (diff.OnlyInFile.Count > 0 ? $"，只在文件里 {string.Join("；", diff.OnlyInFile)}" : "") +
+                         (diff.OnlyInRows.Count > 0 ? $"，只在界面里 {string.Join("；", diff.OnlyInRows)}" : ""));
     }
 
     private bool ReadUiToConfig()
@@ -1104,13 +1153,16 @@ public partial class MainWindow : Window
     /// </summary>
     private void MergeLocalIntent()
     {
-        var rows = _linkRows
-            .Where(r => r.IsRegistry && !string.IsNullOrEmpty(r.NodeId))
-            .ToDictionary(r => r.NodeId, StringComparer.Ordinal);
+        // 键必须是「节点 + 地址」：一个机房多个 IP 时同一个 NodeId 会对应多条链路，
+        // 只用 NodeId 建字典会直接抛"已添加相同键的项"（实测踩过），清单就应用不上了。
+        var rows = new Dictionary<string, LinkRow>(StringComparer.Ordinal);
+
+        foreach (var row in _linkRows.Where(r => r.IsRegistry && !string.IsNullOrEmpty(r.NodeId)))
+            rows[LinkSourceKey(row)] = row;
 
         foreach (var link in _settings.Links.Where(l => l.Source == LinkSources.Registry))
         {
-            if (rows.TryGetValue(link.NodeId, out var row)) link.LocalDisabled = row.LocalDisabled;
+            if (rows.TryGetValue(LinkSourceKey(link), out var row)) link.LocalDisabled = row.LocalDisabled;
         }
     }
 
@@ -1118,27 +1170,46 @@ public partial class MainWindow : Window
     private void SyncRegistryRows(List<LinkConfig> links)
     {
         var registryLinks = links.Where(l => l.Source == LinkSources.Registry).ToList();
-        var live = registryLinks.Select(l => l.NodeId).ToHashSet(StringComparer.Ordinal);
+        var live = registryLinks.Select(l => LinkSourceKey(l)).ToHashSet(StringComparer.Ordinal);
 
-        foreach (var row in _linkRows.Where(r => r.IsRegistry && !live.Contains(r.NodeId)).ToList())
+        // 记下这次被移除的行：现场出现"文件里有、界面里没有"时，
+        // 直接说明是"中心快照里已经没有这些地址了"，而不是让人猜
+        var removed = new List<string>();
+
+        foreach (var row in _linkRows.Where(r => r.IsRegistry && !live.Contains(LinkSourceKey(r))).ToList())
         {
+            removed.Add($"{row.Name}（{row.Target}）");
             row.PropertyChanged -= OnLinkRowChanged;
             _linkRows.Remove(row);
         }
 
+        if (removed.Count > 0)
+        {
+            _configLog.Write($"按中心快照移除注册链路 {removed.Count} 条：{string.Join("；", removed)}");
+            UpdateStatus($"中心快照里已不含这些地址，已从界面移除：{string.Join("、", removed.Take(4))}" +
+                         (removed.Count > 4 ? $" 等 {removed.Count} 条" : "") +
+                         "（对端撤掉了地址、或该机器换回了旧版本注册）");
+        }
+
         foreach (var link in registryLinks)
         {
-            var row = _linkRows.FirstOrDefault(r => r.IsRegistry && r.NodeId == link.NodeId);
+            var row = _linkRows.FirstOrDefault(r => r.IsRegistry && LinkSourceKey(r) == LinkSourceKey(link));
             if (row is null) AddLinkRow(LinkRow.FromConfig(link));
             else row.ApplyFrom(link);
         }
 
         // 撤销缓冲里可能留着已被中心删除的注册行：留着会让"撤销删除"把它复活
-        _lastDeleted.RemoveAll(x => x.Row.IsRegistry && !live.Contains(x.Row.NodeId));
+        _lastDeleted.RemoveAll(x => x.Row.IsRegistry && !live.Contains(LinkSourceKey(x.Row)));
         UpdateUndoButton();
 
         ApplyGlobalProtocolsToRows();
     }
+
+    /// <summary>注册链路的身份：来源节点 + 该链路指向的地址（一个机房多 IP 时靠它区分）。</summary>
+    private static string LinkSourceKey(LinkConfig link) => RegistrySync.Key(link.NodeId, link.Host);
+
+    /// <summary>同上，供界面行使用（行与配置必须用同一套身份，否则会互相错配）。</summary>
+    private static string LinkSourceKey(LinkRow row) => RegistrySync.Key(row.NodeId, row.Host);
 
     /// <summary>
     /// 注册同步触发的自动落盘：不弹模态框。

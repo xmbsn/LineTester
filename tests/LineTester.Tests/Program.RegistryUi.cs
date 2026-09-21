@@ -1420,6 +1420,126 @@ internal static partial class Program
         try { Directory.Delete(root, true); } catch { }
     }
 
+    // ---------------- 多 IP：界面按快照重建时不能把多条压成一条（现场 bug） ----------------
+
+    /// <summary>
+    /// 现场 bug：appsettings.json 里一个机房有 4 个 IP（4 条链路），界面却只显示 1 条
+    /// （名字是最后处理的那个地址，如「厦门机房#4」）。
+    ///
+    /// 根因：界面按快照重建时**只按 NodeId 匹配行**，没带地址 →
+    /// 同一机房的 4 条链路反复覆盖同一行，最后只剩最后一条。
+    /// 这条用例把它钉死：N 个地址必须出现 N 行、名字与主机一一对应。
+    /// </summary>
+    private static void TestRegistryRowsKeepAllAddresses()
+    {
+        Section("注册同步：一个机房多个地址在界面上必须是多条链路（不能被压成一条）");
+
+        var root = Path.Combine(AppContext.BaseDirectory, ".testtmp", "multirow_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        var previousOverride = ConfigManager.OverridePath;
+        ConfigManager.OverridePath = Path.Combine(root, "appsettings.json");
+
+        // 起始：只有一条手工链路
+        ConfigManager.Save(new AppConfig
+        {
+            ListenPort = FindBindablePort(),
+            Links = { new LinkConfig { Name = "手工链路", Host = "203.0.113.99", Port = 9000 } }
+        });
+
+        try
+        {
+            RunOnSta(() =>
+            {
+                var window = new MainWindow();
+                var rows = (System.Collections.IList)GetPrivateField(window, "_linkRows")!;
+
+                // 中心快照：厦门机房 4 个地址（同一个 NodeId）
+                var fourAddresses = new List<NodeSnapshot>
+                {
+                    new()
+                    {
+                        NodeId = "xiamen-node",
+                        Name = "厦门机房",
+                        Ip = "110.86.28.214",
+                        Port = 17078,
+                        Tcp = false,
+                        Udp = true,
+                        Ips = new List<string>
+                        {
+                            "110.86.28.214", "183.250.153.182", "183.250.153.183", "183.250.153.184"
+                        }
+                    }
+                };
+
+                ApplySnapshot(window, fourAddresses);
+                Pump(1500);
+
+                var xiamenRows = rows.Cast<LinkRow>().Where(r => r.NodeId == "xiamen-node").ToList();
+                Eq("4 个地址 → 界面 4 条链路（不是 1 条）", 4, xiamenRows.Count);
+                Check("四条链路的地址各不相同",
+                    xiamenRows.Select(r => r.Host).Distinct(StringComparer.Ordinal).Count() == 4,
+                    string.Join(",", xiamenRows.Select(r => $"{r.Name}@{r.Host}")));
+                Check("名字是 厦门机房 / #2 / #3 / #4",
+                    string.Join(",", xiamenRows.Select(r => r.Name).OrderBy(n => n, StringComparer.Ordinal))
+                        == "厦门机房,厦门机房#2,厦门机房#3,厦门机房#4",
+                    string.Join(",", xiamenRows.Select(r => r.Name)));
+                Check("4 个地址都在，且与名字一一对应",
+                    xiamenRows.Any(r => r.Name == "厦门机房" && r.Host == "110.86.28.214") &&
+                    xiamenRows.Any(r => r.Name == "厦门机房#2" && r.Host == "183.250.153.182") &&
+                    xiamenRows.Any(r => r.Name == "厦门机房#3" && r.Host == "183.250.153.183") &&
+                    xiamenRows.Any(r => r.Name == "厦门机房#4" && r.Host == "183.250.153.184"),
+                    string.Join("；", xiamenRows.Select(r => $"{r.Name}@{r.Host}")));
+                Check("手工链路没被动过",
+                    rows.Cast<LinkRow>().Any(r => r.Name == "手工链路" && !r.IsRegistry));
+
+                // 再同步一次（幂等）：还是 4 条，不能重复添加
+                ApplySnapshot(window, fourAddresses);
+                Pump(1500);
+                Eq("重复同步不会重复添加", 4, rows.Cast<LinkRow>().Count(r => r.NodeId == "xiamen-node"));
+
+                // 对端撤掉两个地址 → 界面只剩 2 条，且删掉的是对应那两条
+                var twoAddresses = new List<NodeSnapshot>
+                {
+                    new()
+                    {
+                        NodeId = "xiamen-node",
+                        Name = "厦门机房",
+                        Ip = "110.86.28.214",
+                        Port = 17078,
+                        Tcp = false,
+                        Udp = true,
+                        Ips = new List<string> { "110.86.28.214", "183.250.153.184" }
+                    }
+                };
+
+                ApplySnapshot(window, twoAddresses);
+                Pump(1500);
+
+                var remaining = rows.Cast<LinkRow>().Where(r => r.NodeId == "xiamen-node").ToList();
+                Eq("撤掉两个地址后剩 2 条", 2, remaining.Count);
+                Check("剩下的是主地址与第 4 个地址",
+                    remaining.Any(r => r.Host == "110.86.28.214") && remaining.Any(r => r.Host == "183.250.153.184"),
+                    string.Join(",", remaining.Select(r => r.Host)));
+                Check("被撤掉的地址不再出现",
+                    remaining.All(r => r.Host != "183.250.153.182" && r.Host != "183.250.153.183"));
+
+                // 文件的链路数必须与界面一致（现场"文件里有、界面里没有"的根因就是这里不一致）
+                var saved = ConfigManager.Load(out _);
+                var diff = LinkConfigDiff.Compare(saved.Links, rows.Cast<LinkRow>().Select(r => r.ToConfig()));
+                Check("落盘后的配置与界面行数一致",
+                    diff.FileCount == diff.RowCount && diff.Same, LinkConfigDiff.Describe(diff, ConfigManager.ConfigPath, null));
+
+                window.Close();
+            }, "多地址行断言");
+        }
+        finally
+        {
+            ConfigManager.OverridePath = previousOverride;
+            try { Directory.Delete(root, true); } catch { }
+        }
+    }
+
     // ---------------- 现场排查：日志 + 中心表格多地址显示 ----------------
 
     /// <summary>

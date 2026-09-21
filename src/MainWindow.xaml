@@ -489,6 +489,8 @@
                         <Button x:Name="UndoDeleteButton" Content="撤销删除" Click="UndoDelete_Click"
                                 IsEnabled="False" Margin="0,0,8,0"
                                 ToolTip="恢复最近一次删除的链路"/>
+                        <Button x:Name="CheckConfigButton" Content="核对配置文件" Click="CheckConfig_Click" Margin="0,0,8,0"
+                                ToolTip="把配置文件里的链路与界面上的行逐条对比：文件里有几条、界面有几条、差在哪——用来判断“文件里有、界面里没有”是不是读错了文件或被外部改过"/>
                         <TextBlock VerticalAlignment="Center" Margin="8,0,0,0" Foreground="#5F6368"
                                    Text="链路改动在点“启动测试”后生效（不会影响历史日志）"/>
                     </StackPanel>
