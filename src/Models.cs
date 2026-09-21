@@ -25,6 +25,12 @@ public sealed class AppConfig
 
     public bool EnableUdp { get; set; } = true;
 
+    /// <summary>
+    /// ICMP（ping）总开关。默认**关闭**：ping 由对端操作系统应答，很多机房的防火墙
+    /// 默认禁止入站 ICMP，勾上后会出现一片"无响应"——需要时再开更稳妥。
+    /// </summary>
+    public bool EnableIcmp { get; set; }
+
     public List<LinkConfig> Links { get; set; } = new();
 
     /// <summary>链路注册与同步（多机房自动互测）配置。默认不启用，行为与升级前完全一致。</summary>
@@ -127,6 +133,12 @@ public sealed class RegistrarConfig
     /// <summary>是否宣告"本端可被 UDP 探测"。</summary>
     public bool AdvertiseUdp { get; set; } = true;
 
+    /// <summary>
+    /// 是否宣告"本端可被 ICMP(ping) 探测"。默认 false：Windows 防火墙默认禁止入站 ping，
+    /// 乱宣告会让其他节点把"对端禁 ping"当成线路故障（与 AdvertiseTcp 同一个道理）。
+    /// </summary>
+    public bool AdvertiseIcmp { get; set; }
+
     // ---- 注册中心 ----
 
     /// <summary>注册中心的外网地址。中心与本机同机时可填 127.0.0.1。</summary>
@@ -167,6 +179,13 @@ public sealed class LinkConfig
     public bool Tcp { get; set; } = true;
     public bool Udp { get; set; } = true;
 
+    /// <summary>
+    /// 是否用 ICMP（ping）探测这条链路。
+    /// ICMP **没有端口**：ping 的目标是主机，本链路的 <see cref="Port"/> 不参与；
+    /// 回包由对端操作系统产生，因此不要求对端运行本工具，也拿不到"对端看到的本端源地址"。
+    /// </summary>
+    public bool Icmp { get; set; }
+
     /// <summary>链路来源：<see cref="LinkSources.Manual"/>（默认）或 <see cref="LinkSources.Registry"/>。</summary>
     public string Source { get; set; } = LinkSources.Manual;
 
@@ -187,6 +206,9 @@ public sealed class LinkConfig
 
     /// <summary>本地单独关掉 UDP 的意图（注册链路）。</summary>
     public bool LocalUdpOff { get; set; }
+
+    /// <summary>本地单独关掉 ICMP(ping) 的意图（注册链路）。</summary>
+    public bool LocalIcmpOff { get; set; }
 
     // 注意：不要在这里添加只读的派生属性（例如 Key / Target）。
     // System.Text.Json 会把公开的只读属性一起序列化，导致配置文件里出现
@@ -269,6 +291,7 @@ public sealed class LinkRow : INotifyPropertyChanged
     private bool _udp = true;
     private bool _globalTcp = true;
     private bool _globalUdp = true;
+    private bool _globalIcmp;
     private string _problem = "";
     private bool _isValid = true;
     private string _source = LinkSources.Manual;
@@ -276,6 +299,8 @@ public sealed class LinkRow : INotifyPropertyChanged
     private bool _localDisabled;
     private bool _localTcpOff;
     private bool _localUdpOff;
+    private bool _localIcmpOff;
+    private bool _icmp;
 
     public string Name { get => _name; set => Set(ref _name, value); }
     public string Host { get => _host; set => Set(ref _host, value); }
@@ -293,6 +318,13 @@ public sealed class LinkRow : INotifyPropertyChanged
         set { if (Set(ref _udp, value)) Raise(nameof(Effective)); }
     }
 
+    /// <summary>本行是否用 ICMP(ping) 探测（与 TCP/UDP 同一套"全局 ∩ 本行"规则）。</summary>
+    public bool Icmp
+    {
+        get => _icmp;
+        set { if (Set(ref _icmp, value)) Raise(nameof(Effective)); }
+    }
+
     /// <summary>
     /// 本行**实际会发出**的协议 = 界面上的全局协议勾选 ∩ 本行自己的勾选。
     /// 全局开关只能收紧、不能放宽：全局取消勾选的协议，本行勾了也不会发。
@@ -301,19 +333,21 @@ public sealed class LinkRow : INotifyPropertyChanged
     {
         get
         {
-            var parts = new List<string>(2);
+            var parts = new List<string>(3);
             if (_globalTcp && Tcp) parts.Add("TCP");
             if (_globalUdp && Udp) parts.Add("UDP");
+            if (_globalIcmp && Icmp) parts.Add("ICMP");
             return parts.Count == 0 ? "不发包" : string.Join(" + ", parts);
         }
     }
 
     /// <summary>全局协议勾选变化时由界面推送进来，用于刷新 <see cref="Effective"/>。</summary>
-    public void SetGlobalProtocols(bool tcp, bool udp)
+    public void SetGlobalProtocols(bool tcp, bool udp, bool icmp)
     {
-        if (_globalTcp == tcp && _globalUdp == udp) return;
+        if (_globalTcp == tcp && _globalUdp == udp && _globalIcmp == icmp) return;
         _globalTcp = tcp;
         _globalUdp = udp;
+        _globalIcmp = icmp;
         Raise(nameof(Effective));
     }
 
@@ -367,6 +401,13 @@ public sealed class LinkRow : INotifyPropertyChanged
         set { if (Set(ref _localUdpOff, value)) Raise(nameof(Diagnosis)); }
     }
 
+    /// <summary>本地单独关掉 ICMP 的意图（注册链路）；同步不会覆盖。</summary>
+    public bool LocalIcmpOff
+    {
+        get => _localIcmpOff;
+        set { if (Set(ref _localIcmpOff, value)) Raise(nameof(Diagnosis)); }
+    }
+
     /// <summary>
     /// 「校验」列的显示文本：错误优先，其次给出注册链路的备注
     /// （本地停测 / 由中心自动维护），避免这一列在正常时整片空白。
@@ -381,6 +422,7 @@ public sealed class LinkRow : INotifyPropertyChanged
             if (LocalDisabled) return "本地已停测（不会被同步覆盖）";
             if (LocalTcpOff) return "本地已关 TCP（不会被同步覆盖）";
             if (LocalUdpOff) return "本地已关 UDP（不会被同步覆盖）";
+            if (LocalIcmpOff) return "本地已关 ICMP（不会被同步覆盖）";
 
             return "来自注册中心（自动维护）";
         }
@@ -403,11 +445,13 @@ public sealed class LinkRow : INotifyPropertyChanged
         Port = Port,
         Tcp = Tcp,
         Udp = Udp,
+        Icmp = Icmp,
         Source = Source,
         NodeId = NodeId,
         LocalDisabled = LocalDisabled,
         LocalTcpOff = LocalTcpOff,
-        LocalUdpOff = LocalUdpOff
+        LocalUdpOff = LocalUdpOff,
+        LocalIcmpOff = LocalIcmpOff
     };
 
     public static LinkRow FromConfig(LinkConfig link)
@@ -427,7 +471,9 @@ public sealed class LinkRow : INotifyPropertyChanged
         PortText = link.Port.ToString();
         Tcp = link.Tcp;
         Udp = link.Udp;
+        Icmp = link.Icmp;
         LocalDisabled = link.LocalDisabled;
+        LocalIcmpOff = link.LocalIcmpOff;
         LocalTcpOff = link.LocalTcpOff || link.LocalDisabled;
         LocalUdpOff = link.LocalUdpOff || link.LocalDisabled;
     }

@@ -94,6 +94,10 @@ internal static partial class Program
             TestLinkToggleWhileRunning();
             await TestRegistryCompatMatrixAsync();
             TestRepoTemplateLoads();
+            TestIcmpPing();
+            TestIcmpProbe();
+            TestIcmpRegistry();
+            TestIcmpUi();
             await TestProbesAsync();
             TestMainWindowClear();
         }
@@ -372,7 +376,7 @@ internal static partial class Program
                     .Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
                 var expectedTop = new[]
                 {
-                    "ConsecutiveLossWarn", "EnableTcp", "EnableUdp", "IntervalMs", "Isp", "Links", "ListenPort",
+                    "ConsecutiveLossWarn", "EnableIcmp", "EnableTcp", "EnableUdp", "IntervalMs", "Isp", "Links", "ListenPort",
                     "LossWarnPercent", "Registrar", "StatWindowMinutes", "TimeoutMs", "WarningRttMs"
                 };
                 Check("顶层字段与配置契约完全一致（无派生字段泄漏）",
@@ -380,7 +384,7 @@ internal static partial class Program
 
                 var actualLink = doc.RootElement.GetProperty("Links")[0].EnumerateObject()
                     .Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
-                var expectedLink = new[] { "Host", "LocalDisabled", "LocalTcpOff", "LocalUdpOff", "Name", "NodeId", "Port", "Source", "Tcp", "Udp" };
+                var expectedLink = new[] { "Host", "Icmp", "LocalDisabled", "LocalIcmpOff", "LocalTcpOff", "LocalUdpOff", "Name", "NodeId", "Port", "Source", "Tcp", "Udp" };
                 Check("链路字段与配置契约完全一致（不含 Key/Target 等派生字段）",
                     actualLink.SequenceEqual(expectedLink), string.Join(",", actualLink));
             }
@@ -1617,28 +1621,28 @@ internal static partial class Program
         // 全局协议勾选 与 链路自身勾选：取交集，总开关只能收紧、不能放宽
         var row = new LinkRow { Name = "A", Host = "h", PortText = "1" };
 
-        row.SetGlobalProtocols(true, true);
+        row.SetGlobalProtocols(true, true, false);
         Eq("全局全开 + 链路全开 → TCP + UDP", "TCP + UDP", row.Effective);
 
-        row.SetGlobalProtocols(true, false);
+        row.SetGlobalProtocols(true, false, false);
         Eq("全局关 UDP → 生效只剩 TCP", "TCP", row.Effective);
 
-        row.SetGlobalProtocols(false, true);
+        row.SetGlobalProtocols(false, true, false);
         Eq("全局关 TCP → 生效只剩 UDP", "UDP", row.Effective);
 
-        row.SetGlobalProtocols(false, false);
+        row.SetGlobalProtocols(false, false, false);
         Eq("全局全关 → 不发包", "不发包", row.Effective);
 
-        row.SetGlobalProtocols(false, true);   // 全局只放行 UDP
+        row.SetGlobalProtocols(false, true, false);   // 全局只放行 UDP
         row.Tcp = false;                       // 链路自己也关掉 TCP
         Eq("全局与链路都关 TCP → 生效只剩 UDP", "UDP", row.Effective);
 
-        row.SetGlobalProtocols(true, true);
+        row.SetGlobalProtocols(true, true, false);
         Eq("全局放开后由链路说了算（链路关了 TCP 就只发 UDP）", "UDP", row.Effective);
 
         var notified = new List<string>();
         row.PropertyChanged += (_, args) => notified.Add(args.PropertyName ?? "");
-        row.SetGlobalProtocols(false, true);
+        row.SetGlobalProtocols(false, true, false);
         Check("全局勾选变化会通知“生效”列刷新",
             notified.Contains(nameof(LinkRow.Effective)), string.Join(",", notified));
         notified.Clear();

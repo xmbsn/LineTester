@@ -20,6 +20,10 @@ public sealed class RegistryClientOptions
     public bool Tcp { get; set; } = true;
 
     public bool Udp { get; set; } = true;
+
+    /// <summary>对外宣告"可被 ICMP(ping) 探测"。</summary>
+    public bool Icmp { get; set; }
+
     public bool Distributable { get; set; } = true;
 
     public string CenterHost { get; set; } = "";
@@ -241,6 +245,7 @@ public sealed class RegistryClient : IDisposable
             Ips = _options.Ips.Count > 1 ? _options.Ips.ToList() : null,
             Tcp = _options.Tcp,
             Udp = _options.Udp,
+            Icmp = _options.Icmp,
             Distributable = _options.Distributable,
             Instance = _instanceId,
             Rev = Status.Revision,

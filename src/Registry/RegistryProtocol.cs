@@ -155,6 +155,10 @@ public sealed class RegisterMessage
     public int Port { get; set; }
     public bool Tcp { get; set; }
     public bool Udp { get; set; }
+
+    /// <summary>是否宣告"本端可被 ICMP(ping) 探测"。</summary>
+    public bool Icmp { get; set; }
+
     public bool Distributable { get; set; } = true;
     public string Instance { get; set; } = "";
     public ulong Rev { get; set; }
@@ -220,6 +224,10 @@ public sealed class NodeSnapshot
     public int Port { get; set; }
     public bool Tcp { get; set; }
     public bool Udp { get; set; }
+
+    /// <summary>对端宣告"可被 ICMP(ping) 探测"。</summary>
+    public bool Icmp { get; set; }
+
     public bool Online { get; set; } = true;
 
     /// <summary>全部外网地址（含主地址）；只有一个地址时可不带。</summary>

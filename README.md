@@ -136,11 +136,11 @@
 | StatWindowMinutes | 实时统计的滑动时间窗口 |
 | LossWarnPercent | 窗口内丢包率达到该百分比才判定“有丢包”（默认 1%，避免历史上一两次丢包长期报警） |
 | ConsecutiveLossWarn | 连续丢包达到该次数判定“中断” |
-| EnableTcp / EnableUdp | 全局协议开关（对应界面上的 TCP / UDP 勾选框）：只有为 `true` 的协议才会发出探测包 |
-| Links | 要测试的远端机房列表；`Tcp` / `Udp` 可分别开关（与全局开关是“与”关系）；**两者都为 `false` 表示该链路不主动探测**（纯服务端 / 临时停测） |
+| EnableTcp / EnableUdp / EnableIcmp | 全局协议开关（对应界面上的 TCP / UDP / ICMP 勾选框）：只有为 `true` 的协议才会发出探测包。ICMP 默认关闭，见「ICMP（ping）探测」 |
+| Links | 要测试的远端机房列表；`Tcp` / `Udp` / `Icmp` 可分别开关（与全局开关是“与”关系）；**三者都为 `false` 表示该链路不主动探测**（纯服务端 / 临时停测） |
 | Links[].Source | `manual`（本地手工，默认）/ `registry`（由注册中心同步维护）。**注册链路不要手工改**，改了下一个同步周期会被覆盖 |
 | Links[].LocalDisabled | 注册链路的“本地停测”意图：界面里把该行 TCP 与 UDP 都取消勾选即置位，**同步不会覆盖它** |
-| Links[].LocalTcpOff / LocalUdpOff | 注册链路的**单协议**本地意图（例如只想测 UDP）：界面里取消勾选该协议即置位，**同步不会覆盖它**——以前单独取消勾选会在下一次同步被改回去 |
+| Links[].LocalTcpOff / LocalUdpOff / LocalIcmpOff | 注册链路的**单协议**本地意图（例如只想测 UDP）：界面里取消勾选该协议即置位，**同步不会覆盖它**——以前单独取消勾选会在下一次同步被改回去 |
 | Registrar | 多机房自动互测（注册中心）配置，见下一节 |
 | Isp | 运营商信息查询（`Enabled` / `Endpoint` / `CacheDays` / `TimeoutMs`）。默认启用；关掉后不发送任何 IP，见「运营商信息与跨运营商判定」 |
 | Registrar.PublicHosts | 本端**其余**外网地址（不含主地址；端口与主地址共用）。同一机房多个出口 IP 时填这里 → 其他节点为每个地址各生成一条链路 |
@@ -226,6 +226,28 @@ dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release
 dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release `
   -- --isp-window 115.231.111.101 16298
 ```
+
+### ICMP（ping）探测
+
+除了 TCP / UDP，还可以用 **ICMP ping** 探测链路——特点是**不要求对端运行本工具**（回包由对端操作系统应答），适合"对端没装程序 / 只想确认主机在线"的场合。
+
+怎么开：
+
+1. 「参数设置」里勾上 **ICMP** 总开关（默认**关闭**）；
+2. 「链路配置」页把该行的 **ICMP** 列勾上（与 TCP/UDP 同一套「全局 ∩ 本行」规则，总开关只能收紧）。
+
+| 特性 | 说明 |
+|---|---|
+| 端口 | **ICMP 没有端口**：ping 的是主机，链路里的端口对它无意义 |
+| 统计 | 延迟（当前 / 平均 / P50 / P95 / P99）与丢包率走**和 TCP/UDP 完全相同的一套统计口径**，界面里单独一行（协议列显示 `ICMP`），可以和 TCP/UDP 直接横向对比 |
+| 对端要求 | **不需要**对端运行本工具（回包由操作系统内核产生） |
+| RTT 精度 | **1 毫秒**（Windows `IcmpSendEcho` 的限制），不像 TCP/UDP 是微秒级 |
+| 「对端看到的本端地址」 | ICMP 拿不到（内核不会替我们回显），该列显示 `-`；本端运营商由同链路其它协议的结果补齐 |
+| 权限 | 用系统 ping 接口，**不需要管理员权限**、不使用原始套接字 |
+| 失败原因 | 对端禁 ping 与线路不通在网络层都表现为"无响应" → ICMP 超时显示 **"无响应（超时；对端可能禁 ping 或线路不通）"** |
+| 防火墙 | Windows 默认**禁止入站 ICMP 回显**。要让别人能 ping 通本机：<br>`New-NetFirewallRule -DisplayName "LineTester ICMPv4-In" -Direction Inbound -Protocol ICMPv4 -IcmpType 8 -Action Allow` |
+| IPv6 | 目前只支持 IPv4 目标（IPv6 会明确报"只支持 IPv4"） |
+| 注册中心 | 「注册中心」页可勾「ICMP」（允许被 ping）。默认不勾——乱宣告会让别的节点把"对端禁 ping"当成线路故障（与「可被 TCP 探测」同理） |
 
 ### 多机房自动互测（注册中心）
 
@@ -382,7 +404,7 @@ dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release
 
 > 两点说明：
 > 1. 本机无法访问 nuget.org，因此没有使用 xunit 等需要联网还原的框架，
->    而是用一个控制台断言宿主实现同等覆盖（当前 1129 项断言）。
+>    而是用一个控制台断言宿主实现同等覆盖（当前 1172 项断言）。
 > 2. 测试工程**没有**加进 `LineTester.sln`。本机 .NET SDK 的工作负载子系统损坏
 >    （`Sdks\Microsoft.NET.SDK.Workload*Locator` 缺失、`dotnet --info` 列工作负载即崩溃），
 >    导致**任何多项目解决方案**的还原都会失败；单项目解决方案与按路径构建/运行均正常。

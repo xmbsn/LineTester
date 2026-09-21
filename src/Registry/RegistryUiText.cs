@@ -108,7 +108,7 @@ public static class RegistryUiText
                 "本机不会出现在别人的链路里。", true);
         }
 
-        var protocols = DescribeProtocols(config.AdvertiseTcp, config.AdvertiseUdp);
+        var protocols = DescribeProtocols(config.AdvertiseTcp, config.AdvertiseUdp, config.AdvertiseIcmp);
         var target = $"{config.PublicHost.Trim()}:{config.PublicPort}";
 
         if (!config.AdvertiseTcp && !config.AdvertiseUdp)
@@ -121,13 +121,21 @@ public static class RegistryUiText
         return new StatusNote($"可被其他节点探测：{target}（{protocols}）", false);
     }
 
-    public static string DescribeProtocols(bool tcp, bool udp) => (tcp, udp) switch
+    public static string DescribeProtocols(bool tcp, bool udp, bool icmp = false)
     {
-        (true, true) => "TCP + UDP",
-        (true, false) => "仅 TCP",
-        (false, true) => "仅 UDP",
-        _ => "都未勾选"
-    };
+        var parts = new List<string>(3);
+        if (tcp) parts.Add("TCP");
+        if (udp) parts.Add("UDP");
+        if (icmp) parts.Add("ICMP");
+
+        return parts.Count switch
+        {
+            0 => "都未勾选",
+            1 => "仅 " + parts[0],
+            3 => "TCP + UDP + ICMP",
+            _ => string.Join(" + ", parts)
+        };
+    }
 
     /// <summary>中心节点表里的状态列：在线/分发/认证/疑似重复。</summary>
     public static string DescribeNodeState(RegistryNode node)

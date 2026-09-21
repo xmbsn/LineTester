@@ -74,6 +74,7 @@ public partial class MainWindow : Window
     /// <summary>界面上勾选的协议开关，探测循环每轮读取，因此取消勾选立即生效。</summary>
     private volatile bool _liveTcp = true;
     private volatile bool _liveUdp = true;
+    private volatile bool _liveIcmp;
 
     private ProbeServer? _server;
     private CancellationTokenSource? _cts;
@@ -129,6 +130,8 @@ public partial class MainWindow : Window
         TcpCheck.Unchecked += Protocol_Changed;
         UdpCheck.Checked += Protocol_Changed;
         UdpCheck.Unchecked += Protocol_Changed;
+        IcmpCheck.Checked += Protocol_Changed;
+        IcmpCheck.Unchecked += Protocol_Changed;
 
         // 注册中心页：校验与落盘仍走主窗口这一条路径，页内只负责显示与即时操作
         RegistryTabPanel.SaveRequested += () => SaveConfig_Click(this, new RoutedEventArgs());
@@ -253,6 +256,7 @@ public partial class MainWindow : Window
         // 会触发 Protocol_Changed，从而把 _liveTcp/_liveUdp 同步到最新
         TcpCheck.IsChecked = cfg.EnableTcp;
         UdpCheck.IsChecked = cfg.EnableUdp;
+        IcmpCheck.IsChecked = cfg.EnableIcmp;
 
         // 会触发 IspCheck_Changed，从而按配置开关运营商查询
         IspCheck.IsChecked = cfg.Isp.Enabled;
@@ -329,31 +333,32 @@ public partial class MainWindow : Window
         // 注册链路：本端对协议的勾选是"本地意图"，必须写回配置——
         // 否则下一次同步会按中心宣告的值把它改回来（现场反馈的"取消勾选 TCP，重启又勾上了"）。
         if (sender is LinkRow { IsRegistry: true } registryRow &&
-            e.PropertyName is nameof(LinkRow.Tcp) or nameof(LinkRow.Udp))
+            e.PropertyName is nameof(LinkRow.Tcp) or nameof(LinkRow.Udp) or nameof(LinkRow.Icmp))
         {
-            var disabled = !registryRow.Tcp && !registryRow.Udp;
+            var disabled = !registryRow.Tcp && !registryRow.Udp && !registryRow.Icmp;
 
             var changed = registryRow.LocalTcpOff != !registryRow.Tcp ||
                           registryRow.LocalUdpOff != !registryRow.Udp ||
+                          registryRow.LocalIcmpOff != !registryRow.Icmp ||
                           registryRow.LocalDisabled != disabled;
 
             if (changed)
             {
                 registryRow.LocalTcpOff = !registryRow.Tcp;
                 registryRow.LocalUdpOff = !registryRow.Udp;
+                registryRow.LocalIcmpOff = !registryRow.Icmp;
                 registryRow.LocalDisabled = disabled;
 
                 UpdateStatus(disabled
                     ? $"「{registryRow.Name}」已本地停测：注册同步不会覆盖这个意图，重新勾选任一协议即恢复"
-                    : $"「{registryRow.Name}」本地协议选择已记录（{(registryRow.Tcp ? "TCP" : "TCP 关")}/" +
-                      $"{(registryRow.Udp ? "UDP" : "UDP 关")}），注册同步不会覆盖");
+                    : $"「{registryRow.Name}」本地协议选择已记录（{registryRow.Effective}），注册同步不会覆盖");
             }
 
             // 改过协议选择后立刻同步一次，让状态尽早与中心一致
             if (_registryClient is not null) _ = _registryClient.RegisterNowAsync();
         }
         else if (sender is LinkRow toggledRow &&
-                 e.PropertyName is nameof(LinkRow.Tcp) or nameof(LinkRow.Udp) &&
+                 e.PropertyName is nameof(LinkRow.Tcp) or nameof(LinkRow.Udp) or nameof(LinkRow.Icmp) &&
                  toggledRow.IsValid)
         {
             // 协议勾选只可能"收紧"发包范围 → 立刻生效，不必等防抖
@@ -704,6 +709,7 @@ public partial class MainWindow : Window
         _settings.ConsecutiveLossWarn = lossCount;
         _settings.EnableTcp = TcpCheck.IsChecked == true;
         _settings.EnableUdp = UdpCheck.IsChecked == true;
+        _settings.EnableIcmp = IcmpCheck.IsChecked == true;
 
         // 注册配置（未启用注册时不做校验，与 ValidateRegistrar 口径一致）
         if (!RegistryTabPanel.TryReadInto(_settings.Registrar, out var registrarError))
@@ -1024,6 +1030,7 @@ public partial class MainWindow : Window
                 .ToList(),
             Tcp = _settings.Registrar.AdvertiseTcp,
             Udp = _settings.Registrar.AdvertiseUdp,
+            Icmp = _settings.Registrar.AdvertiseIcmp,
             Distributable = _settings.Registrar.Distributable,
             CenterHost = _settings.Registrar.CenterHost,
             CenterPort = _settings.Registrar.CenterPort,
@@ -1467,12 +1474,14 @@ public partial class MainWindow : Window
             // 每轮重新读取协议勾选，取消勾选后本轮即停止发送该协议的探测包
             var sendTcp = _liveTcp;
             var sendUdp = _liveUdp;
+            var sendIcmp = _liveIcmp;
 
-            var tasks = new List<Task<ProbeResult?>>(links.Length * 2);
+            var tasks = new List<Task<ProbeResult?>>(links.Length * 3);
             foreach (var link in links)
             {
-                if (sendTcp && link.Tcp) tasks.Add(_client.ProbeAsync(link, "TCP", timeout, ct));
-                if (sendUdp && link.Udp) tasks.Add(_client.ProbeAsync(link, "UDP", timeout, ct));
+                if (sendTcp && link.Tcp) tasks.Add(_client.ProbeAsync(link, ProbeClient.ProtocolTcp, timeout, ct));
+                if (sendUdp && link.Udp) tasks.Add(_client.ProbeAsync(link, ProbeClient.ProtocolUdp, timeout, ct));
+                if (sendIcmp && link.Icmp) tasks.Add(_client.ProbeAsync(link, ProbeClient.ProtocolIcmp, timeout, ct));
             }
 
             if (tasks.Count > 0)
@@ -1638,9 +1647,10 @@ public partial class MainWindow : Window
 
         if (applied is null) return; // 还没生效过的行（例如刚新增）→ 交给防抖
 
-        // 探测循环每轮重新读取这两个字段，因此下一轮就停止发送
+        // 探测循环每轮重新读取这几个字段，因此下一轮就停止发送
         applied.Tcp = row.Tcp;
         applied.Udp = row.Udp;
+        applied.Icmp = row.Icmp;
 
         _appliedLinksSignature = LinksSignatureOf(_liveLinks);
         UpdateLinkSummary();
@@ -1725,6 +1735,7 @@ public partial class MainWindow : Window
     {
         _liveTcp = TcpCheck.IsChecked == true;
         _liveUdp = UdpCheck.IsChecked == true;
+        _liveIcmp = IcmpCheck.IsChecked == true;
         ApplyGlobalProtocolsToRows();
         RefreshStatusBar();
     }
@@ -1732,7 +1743,7 @@ public partial class MainWindow : Window
     /// <summary>把全局协议勾选推给链路编辑器，让每行显示“实际会发出的协议”。</summary>
     private void ApplyGlobalProtocolsToRows()
     {
-        foreach (var row in _linkRows) row.SetGlobalProtocols(_liveTcp, _liveUdp);
+        foreach (var row in _linkRows) row.SetGlobalProtocols(_liveTcp, _liveUdp, _liveIcmp);
     }
 
     /// <summary>当前实际会发出去的探测路数（链路 × 已勾选协议，再与链路自身的开关取交集）。</summary>
@@ -1748,8 +1759,26 @@ public partial class MainWindow : Window
         {
             if (_liveTcp && link.Tcp) count++;
             if (_liveUdp && link.Udp) count++;
+            if (_liveIcmp && link.Icmp) count++;
         }
         return count;
+    }
+
+    /// <summary>把全局协议开关描述成一行（状态栏用）。三个都没勾 = 只监听不应答探测。</summary>
+    private static string DescribeProtocolSwitches(bool tcp, bool udp, bool icmp)
+    {
+        var parts = new List<string>(3);
+        if (tcp) parts.Add("TCP");
+        if (udp) parts.Add("UDP");
+        if (icmp) parts.Add("ICMP");
+
+        return parts.Count switch
+        {
+            0 => "无（只监听不应答探测）",
+            1 => "仅 " + parts[0],
+            3 => "TCP + UDP + ICMP",
+            _ => string.Join(" + ", parts)
+        };
     }
 
     private void RefreshStatusBar()
@@ -1761,13 +1790,7 @@ public partial class MainWindow : Window
             : Color.FromRgb(0x9A, 0xA0, 0xA6));
         StatusText.Text = running ? "运行中" : "已停止";
 
-        var protocols = (_liveTcp, _liveUdp) switch
-        {
-            (true, true) => "TCP + UDP",
-            (true, false) => "仅 TCP",
-            (false, true) => "仅 UDP",
-            _ => "无（只监听不应答探测）"
-        };
+        var protocols = DescribeProtocolSwitches(_liveTcp, _liveUdp, _liveIcmp);
 
         StatusParams.Text = running
             ? $"监听 {_settings.ListenPort} | 协议 {protocols} | 生效探测 {ActiveProbeCount()} 路 | " +
@@ -1835,6 +1858,8 @@ public partial class MainWindow : Window
             parts.Add($"最近失败：{status.LastError}");
 
         if (status.Pending > 0) parts.Add($"{status.Pending} 个地址待查询");
+        else if (status.Cached == 0 && status.Requested > 0)
+            parts.Add($"已登记 {status.Requested} 个地址，等首轮查询");
 
         var privateTargets = _statRows.Values.Count(r => IspAddressRules.HostPart(r.Target) is { Length: > 0 } h && !IspAddressRules.IsPublicIp(h));
         if (privateTargets > 0)

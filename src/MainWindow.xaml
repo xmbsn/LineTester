@@ -273,8 +273,9 @@
                         <CheckBox x:Name="TcpCheck" Style="{StaticResource FieldCheck}" Content="TCP" IsChecked="True"
                                   ToolTip="TCP 总开关：取消勾选立即停止所有链路的 TCP 探测（无需重启测试）。链路自身未勾 TCP 的，勾了这里也不会发"/>
                         <CheckBox x:Name="UdpCheck" Style="{StaticResource FieldCheck}" Content="UDP" IsChecked="True"
-                                  Margin="0"
                                   ToolTip="UDP 总开关：取消勾选立即停止所有链路的 UDP 探测（无需重启测试）。链路自身未勾 UDP 的，勾了这里也不会发"/>
+                        <CheckBox x:Name="IcmpCheck" Style="{StaticResource FieldCheck}" Content="ICMP" Margin="0"
+                                  ToolTip="ICMP(ping) 总开关：默认关闭。ping 由对端操作系统应答，不要求对端运行本工具，也不占端口；&#10;很多机房防火墙默认禁止入站 ping，勾上后可能一片“无响应（超时；对端可能禁 ping）”——那是安全策略，不代表线路坏。&#10;往返时间精度是 1 毫秒（系统接口限制）"/>
                     </StackPanel>
                 </Grid>
 
@@ -532,6 +533,9 @@
                             <DataGridCheckBoxColumn Header="UDP"
                                                     Binding="{Binding Udp, UpdateSourceTrigger=PropertyChanged}"
                                                     Width="60"/>
+                            <DataGridCheckBoxColumn Header="ICMP"
+                                                    Binding="{Binding Icmp, UpdateSourceTrigger=PropertyChanged}"
+                                                    Width="62"/>
                             <DataGridTextColumn Header="来源" Binding="{Binding SourceText}" Width="80"
                                                 IsReadOnly="True"/>
                             <DataGridTextColumn Header="生效（实际发包）" Binding="{Binding Effective}" Width="130"

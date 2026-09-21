@@ -23,3 +23,7 @@ ip-isp-cache.json
 *.tmp
 *.user
 .vs/
+
+# 现场抓包/录屏等大文件（放在仓库目录里方便，但不进版本库）
+*.7z
+*.pcapng

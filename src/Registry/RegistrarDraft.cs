@@ -46,6 +46,7 @@ public sealed class RegistrarDraft
     public bool Distributable { get; set; } = true;
     public bool AdvertiseTcp { get; set; } = true;
     public bool AdvertiseUdp { get; set; } = true;
+    public bool AdvertiseIcmp { get; set; }
 
     // ---- 注册中心 ----
     public string CenterHost { get; set; } = "";
@@ -70,6 +71,7 @@ public sealed class RegistrarDraft
         Distributable = config.Distributable,
         AdvertiseTcp = config.AdvertiseTcp,
         AdvertiseUdp = config.AdvertiseUdp,
+        AdvertiseIcmp = config.AdvertiseIcmp,
         CenterHost = config.CenterHost,
         CenterPortText = config.CenterPort > 0 ? config.CenterPort.ToString(CultureInfo.InvariantCulture) : "",
         Secret = config.Secret,
@@ -99,6 +101,7 @@ public sealed class RegistrarDraft
         config.Distributable = Distributable;
         config.AdvertiseTcp = AdvertiseTcp;
         config.AdvertiseUdp = AdvertiseUdp;
+        config.AdvertiseIcmp = AdvertiseIcmp;
         config.CenterHost = CenterHost.Trim();
         config.CenterPort = ParseInt(CenterPortText);
         config.Secret = Secret;

@@ -97,6 +97,7 @@ public partial class RegistryPanel : UserControl
         DistributableCheck.IsChecked = draft.Distributable;
         AdvertiseTcpCheck.IsChecked = draft.AdvertiseTcp;
         AdvertiseUdpCheck.IsChecked = draft.AdvertiseUdp;
+        AdvertiseIcmpCheck.IsChecked = draft.AdvertiseIcmp;
 
         NodeNameBox.Text = draft.NodeName;
 
@@ -136,6 +137,7 @@ public partial class RegistryPanel : UserControl
         draft.Distributable = DistributableCheck.IsChecked == true;
         draft.AdvertiseTcp = AdvertiseTcpCheck.IsChecked == true;
         draft.AdvertiseUdp = AdvertiseUdpCheck.IsChecked == true;
+        draft.AdvertiseIcmp = AdvertiseIcmpCheck.IsChecked == true;
 
         draft.NodeName = NodeNameBox.Text;
 

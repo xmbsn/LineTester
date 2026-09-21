@@ -407,10 +407,18 @@ internal static partial class Program
                 var rows = (System.Collections.IList)GetPrivateField(window, "_stats")!;
                 WaitUntilPump(() => rows.Count > 0, 6000);
                 // 配置里的链路目标应当在**启动时**就登记查询（不等探测出样本），
-                // 否则刚启动时"目标运营商"那一列是空的，看起来像查不到
-                Check("启动时就为配置里的目标登记了查询（请求数 > 0）", fetcher.CallCount > 0, fetcher.CallCount.ToString());
+                // 否则刚启动时"目标运营商"那一列是空的，看起来像查不到。
+                // 注意：这里断言的是"登记"（同步发生，只增不减的计数），不是"已抓到"——
+                // 查询循环最长要等 1 秒的批次窗口，按 CallCount 断言会随探测快慢时绿时红（踩过）。
+                var isp = GetPrivateField(window, "_isp") as IspLookupService;
+                Check("启动时就把配置里的目标登记为待查（不等探测样本）",
+                    (isp?.Status.Requested ?? 0) > 0, $"Requested={isp?.Status.Requested}");
+                // 再等真正发出去的那一次请求（最多两个批次窗口）
+                WaitUntilPump(() => fetcher.CallCount > 0, 5000);
+                Check("登记之后确实发出了查询请求（请求数 > 0）", fetcher.CallCount > 0, fetcher.CallCount.ToString());
                 Check("查询里包含配置的目标地址",
-                    fetcher[0].Contains("221.5.88.88"), string.Join(",", fetcher[0]));
+                    fetcher.CallCount > 0 && fetcher[0].Contains("221.5.88.88"),
+                    fetcher.CallCount > 0 ? string.Join(",", fetcher[0]) : "（没有请求）");
 
                 if (rows.Count > 0)
                 {

@@ -171,6 +171,8 @@
                                   Content="TCP" ToolTip="本端允许被 TCP 探测"/>
                         <CheckBox x:Name="AdvertiseUdpCheck" Style="{StaticResource RegCheck}"
                                   Content="UDP" ToolTip="本端允许被 UDP 探测"/>
+                        <CheckBox x:Name="AdvertiseIcmpCheck" Style="{StaticResource RegCheck}"
+                                  Content="ICMP" ToolTip="本端允许被 ICMP(ping) 探测。默认不勾：Windows 防火墙默认禁止入站 ping，乱宣告会让其他节点把“对端禁 ping”当成线路故障"/>
                     </StackPanel>
                     <TextBlock Style="{StaticResource RegHint}"
                                Text="与「参数设置」里的全局协议勾选含义不同：这里是“允许别人怎么测我”。机房只映射了 UDP 就关掉 TCP，否则对端会把必然失败的探测判成线路故障。"/>

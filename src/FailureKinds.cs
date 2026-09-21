@@ -58,4 +58,25 @@ public static class FailureKinds
         Other => "其他错误",
         _ => "超时/丢包"
     };
+
+    /// <summary>
+    /// 带上协议上下文的说明。ICMP 需要区分一件在现场极常见、但语义完全不同的事：
+    /// **对端防火墙禁 ping** 与**线路真的不通**在协议层面都表现为"无响应"，
+    /// 所以 ICMP 的超时要额外提示"对端可能禁 ping"，避免把安全策略判成线路故障。
+    /// </summary>
+    public static string Describe(string? kind, string? protocol)
+    {
+        if (string.Equals(protocol, "ICMP", StringComparison.OrdinalIgnoreCase))
+        {
+            return kind switch
+            {
+                Timeout => "无响应（超时；对端可能禁 ping 或线路不通）",
+                IcmpUnreachable => "目标不可达（收到 ICMP 不可达）",
+                Unreachable => "网络/主机不可达",
+                _ => Describe(kind)
+            };
+        }
+
+        return Describe(kind);
+    }
 }

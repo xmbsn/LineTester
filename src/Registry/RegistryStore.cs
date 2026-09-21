@@ -20,6 +20,8 @@ public sealed class RegistryNode
     public bool Tcp { get; set; }
     public bool Udp { get; set; }
 
+    /// <summary>节点自报：是否允许被 ICMP(ping) 探测。</summary>
+    public bool Icmp { get; set; }
     /// <summary>节点自报：是否允许被分发（对端心跳每次都会重报）。</summary>
     public bool Distributable { get; set; } = true;
 
@@ -189,6 +191,7 @@ public sealed class RegistryStore
             node.Port != message.Port ||
             node.Tcp != message.Tcp ||
             node.Udp != message.Udp ||
+            node.Icmp != message.Icmp ||
             node.Distributable != message.Distributable ||
             !node.Ips.SequenceEqual(addresses, StringComparer.OrdinalIgnoreCase))
         {
@@ -201,6 +204,7 @@ public sealed class RegistryStore
         node.Port = message.Port;
         node.Tcp = message.Tcp;
         node.Udp = message.Udp;
+        node.Icmp = message.Icmp;
         node.Distributable = message.Distributable;
         node.InstanceId = message.Instance;
         node.LastSeenUtc = now;
@@ -308,6 +312,7 @@ public sealed class RegistryStore
                 Port = n.Port,
                 Tcp = n.Tcp,
                 Udp = n.Udp,
+                Icmp = n.Icmp,
                 Online = n.Online
             })
             .ToList();

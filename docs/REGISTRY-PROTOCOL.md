@@ -113,6 +113,7 @@
 | `PublicPort` | 0 | 1~65535 | 手工填写：本节点对外端口（机房映射的那个） |
 | `Distributable` | true | | 见 §6.2 |
 | `AdvertiseTcp` / `AdvertiseUdp` | 均 true | | **对外宣告"本端可被探测的协议"**，决定其他节点生成的链路的 `Tcp`/`Udp`。默认都开；**机房只映射了 UDP 时请关掉 `AdvertiseTcp`**（否则其他节点会把 TCP 的必然失败判成线路故障）。注意这与全局协议开关 `EnableTcp/EnableUdp` **语义不同**：后者是"我主动发不发"，前者是"允许别人怎么测我" |
+| `AdvertiseIcmp` | false | | 是否宣告"本端可被 ICMP(ping) 探测"。默认**关闭**：Windows 防火墙默认禁止入站 ping，乱宣告会让其他节点把"对端禁 ping"当成线路故障（与 `AdvertiseTcp` 同理） |
 | `CenterHost` / `CenterPort` | "" / 0 | | 注册中心的**外网**地址与端口。中心与本机同机时可填 `127.0.0.1` |
 | `Secret` | "" | 非空才启用 | 预共享密钥（HMAC），**不上线** |
 | `HeartbeatSeconds` | 60 | 15~3600 | 心跳注册周期（保活，也是判活依据） |
@@ -131,7 +132,9 @@
 |---|---|---|
 | `Source` | `"manual"` | `manual` 本地手工 / `registry` 注册来源。缺省即 manual → **旧配置无需改动** |
 | `NodeId` | "" | 注册来源时记录来源节点，用于同步去重/清理 |
-| `LocalDisabled` | false | 本地停测意图（§8.5）。为 true 时**无论中心下发什么协议，本链路都设为 Tcp=false、Udp=false** |
+| `LocalDisabled` | false | 本地停测意图（§8.5）。为 true 时**无论中心下发什么协议，本链路都设为 Tcp=false、Udp=false**（ICMP 同理） |
+| `LocalTcpOff` / `LocalUdpOff` / `LocalIcmpOff` | false | **单协议**本地意图（§8.5）：中心宣告该协议可用、但本端只想测别的协议时置位，同步不会覆盖 |
+| `Icmp` | false | 是否用 ICMP(ping) 探测该链路。**ICMP 没有端口**：ping 的是主机，`Port` 对 ICMP 无意义；回包由对端操作系统产生，因此不要求对端运行本工具，也拿不到"对端看到的本端源地址" |
 
 > 配置契约测试（`tests/…/Program.cs`）里"顶层键 / 链路键"的断言需要同步更新：这是**有意的契约变更**。
 
@@ -215,6 +218,7 @@ LT1|<TYPE>|<MAC>|<rawPayload>\n
 | `ip` / `port` | 是 | 本端对外**主**地址与端口（§6 规则校验） |
 | `ips` | 否 | 本端**全部**外网地址（含主地址，端口相同）。**只有多于一个地址时才带**；缺省时双方都按单个 `ip` 处理 → 与老版本完全互通。每个地址都要通过 §6 规则校验，**任何一个不可分发则整条注册被拒**（错误信息里点名是哪个地址） |
 | `tcp` / `udp` | 是 | **对外宣告的可被探测协议**（对应 `AdvertiseTcp`/`AdvertiseUdp`），决定别人链路的 `Tcp`/`Udp` |
+| `icmp` | 否 | 是否宣告"可被 ICMP(ping) 探测"（对应 `AdvertiseIcmp`）。缺省 false → 与老版本完全互通 |
 | `distributable` | 是 | 是否允许被分发给其他节点 |
 | `instance` | 是 | 进程启动时随机生成；中心据此识别"对端重启过" |
 | `rev` | 是 | 客户端**已应用**的中心 revision；0 = 首次 |
@@ -225,7 +229,7 @@ LT1|<TYPE>|<MAC>|<rawPayload>\n
 ```json
 {"reqId":"a1b2c3d4","rev":138,"changed":true,"reannounceAfter":180,
  "selfCheck":{"seenIp":"198.51.100.7","seenPort":41234},
- "nodes":[{"nodeId":"…","name":"机房B","ip":"203.0.113.20","port":50002,"tcp":true,"udp":true,"online":true,
+ "nodes":[{"nodeId":"…","name":"机房B","ip":"203.0.113.20","port":50002,"tcp":true,"udp":true,"icmp":false,"online":true,
           "ips":["203.0.113.20","203.0.113.21"]}, …],
  "deleted":[]}
 ```

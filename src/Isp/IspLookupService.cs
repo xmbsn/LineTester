@@ -84,6 +84,7 @@ public sealed class IspLookupService : IDisposable
 
             _pending.Add(value);
             Status.Pending = _pending.Count;
+            Status.Requested++;
         }
     }
 

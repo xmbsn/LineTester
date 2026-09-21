@@ -142,6 +142,13 @@ public sealed class IspLookupStatus
     /// <summary>还在等结果的地址数。</summary>
     public int Pending { get; set; }
 
+    /// <summary>
+    /// 累计登记过多少次查询（只增不减）。
+    /// 「登记」和「拿到结果」之间隔着最多 1 秒的批次等待，
+    /// 所以刚启动时 Pending 可能已归零、Cached 还是 0——只有这个数能回答"到底登记上没有"。
+    /// </summary>
+    public int Requested { get; set; }
+
     public DateTime? LastSuccessUtc { get; set; }
     public string? LastError { get; set; }
 

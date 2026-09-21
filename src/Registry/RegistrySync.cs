@@ -87,10 +87,14 @@ public static class RegistrySync
                 var udpOff = current is null
                     ? false
                     : current.LocalUdpOff || current.LocalDisabled;
+                var icmpOff = current is null
+                    ? false
+                    : current.LocalIcmpOff || current.LocalDisabled;
 
                 var localDisabled = tcpOff && udpOff;
                 var tcp = node.Tcp && !tcpOff;
                 var udp = node.Udp && !udpOff;
+                var icmp = node.Icmp && !icmpOff;
 
                 if (current is null)
                 {
@@ -99,7 +103,8 @@ public static class RegistrySync
                 else if (current.Name != name ||
                          current.Port != node.Port ||
                          current.Tcp != tcp ||
-                         current.Udp != udp)
+                         current.Udp != udp ||
+                         current.Icmp != icmp)
                 {
                     updated++;
                 }
@@ -112,11 +117,13 @@ public static class RegistrySync
                     Port = node.Port,
                     Tcp = tcp,
                     Udp = udp,
+                    Icmp = icmp,
                     Source = LinkSources.Registry,
                     NodeId = node.NodeId,
                     LocalDisabled = localDisabled,
                     LocalTcpOff = tcpOff,
-                    LocalUdpOff = udpOff
+                    LocalUdpOff = udpOff,
+                    LocalIcmpOff = icmpOff
                 });
             }
         }

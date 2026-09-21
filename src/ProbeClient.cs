@@ -29,6 +29,14 @@ public sealed class ProbeClient
     /// <summary>探测包末尾的版本标记：请求被动端回显“它看到的本端源地址”。</summary>
     private const string ObservedAddressRequest = "|v2";
 
+    /// <summary>协议名（与界面/日志/统计里的写法一致）。</summary>
+    public const string ProtocolTcp = "TCP";
+    public const string ProtocolUdp = "UDP";
+    public const string ProtocolIcmp = "ICMP";
+
+    /// <summary>支持探测的协议列表（界面、校验、统计共用一份）。</summary>
+    public static readonly string[] Protocols = { ProtocolTcp, ProtocolUdp, ProtocolIcmp };
+
     /// <summary>
     /// 等待回包中可选附加信息的宽限时间。
     /// 老版本被动端只回显原包、不会有这段，宽限到期就按“没有附加信息”处理。
@@ -50,11 +58,12 @@ public sealed class ProbeClient
         var seq = NextSeq(link, protocol);
         var probeId = Guid.NewGuid().ToString("N");
 
-        // 报文格式：序号|探测ID|v2
+        // 报文格式：序号|探测ID|v2（ICMP 用 |icmp：回包由对端内核产生，不会附源地址）
         // 序号让抓包（Wireshark 等）能直接读出这是第几个探测包，
         // 探测ID 让客户端能确认回包确实属于本次探测，
         // 末尾的 v2 表示“请把你看我的源地址一并回显”（老版本被动端会忽略它、原样回显）。
-        var payload = Encoding.UTF8.GetBytes($"{seq}|{probeId}{ObservedAddressRequest}");
+        var suffix = protocol == ProtocolIcmp ? IcmpPinger.PayloadSuffix : ObservedAddressRequest;
+        var payload = Encoding.UTF8.GetBytes($"{seq}|{probeId}{suffix}");
 
         try
         {
@@ -62,9 +71,12 @@ public sealed class ProbeClient
             timeout.CancelAfter(timeoutMs);
             var token = timeout.Token;
 
-            return protocol == "TCP"
-                ? await ProbeTcpAsync(link, protocol, timestamp, seq, probeId, payload, token).ConfigureAwait(false)
-                : await ProbeUdpAsync(link, protocol, timestamp, seq, probeId, payload, token).ConfigureAwait(false);
+            return protocol switch
+            {
+                ProtocolTcp => await ProbeTcpAsync(link, protocol, timestamp, seq, probeId, payload, token).ConfigureAwait(false),
+                ProtocolIcmp => await ProbeIcmpAsync(link, protocol, timestamp, seq, probeId, payload, timeoutMs, token).ConfigureAwait(false),
+                _ => await ProbeUdpAsync(link, protocol, timestamp, seq, probeId, payload, token).ConfigureAwait(false)
+            };
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -225,8 +237,33 @@ public sealed class ProbeClient
         return true;
     }
 
-    private async Task<ProbeResult> ProbeUdpAsync(
+    /// <summary>
+    /// ICMP 探测。
+    ///
+    /// 与 TCP/UDP 的差别（都在统计口径里体现）：
+    /// ① **没有端口**：ping 的是主机，链路的 Port 不参与；
+    /// ② 回包由**对端内核**产生，因此没有"对端看到的本端源地址"（SeenFrom 为空）；
+    /// ③ 往返时间精度是 **1 毫秒**（系统接口限制），不像 TCP/UDP 是微秒级；
+    /// ④ 对端禁 ping 时表现为**超时**，失败原因里会额外提示这一点（见 FailureKinds.Describe）。
+    /// </summary>
+    private async Task<ProbeResult> ProbeIcmpAsync(
         LinkConfig link, string protocol, DateTime timestamp, long seq, string probeId,
+        byte[] payload, int timeoutMs, CancellationToken token)
+    {
+        var setup = Stopwatch.StartNew();
+        var address = await ResolveAsync(link.Host, token).ConfigureAwait(false);
+        setup.Stop();
+
+        var reply = await IcmpPinger.PingAsync(address, payload, timeoutMs, token).ConfigureAwait(false);
+
+        if (!reply.Success)
+            throw new ProbeFailureException(reply.FailureToken, reply.Detail);
+
+        // 对端看到的源地址：ICMP 拿不到（内核不会替我们回显），留空
+        return Ok(link, protocol, timestamp, seq, probeId, "", reply.RttMs, setup.Elapsed.TotalMilliseconds);
+    }
+
+    private async Task<ProbeResult> ProbeUdpAsync(        LinkConfig link, string protocol, DateTime timestamp, long seq, string probeId,
         byte[] payload, CancellationToken token)
     {
         var setup = Stopwatch.StartNew();
