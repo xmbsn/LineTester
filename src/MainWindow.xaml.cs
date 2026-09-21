@@ -902,6 +902,7 @@ public partial class MainWindow : Window
 
             StartRegistryClient(notes);
             StartIspLookup();
+            RequestIspForLinks(_liveLinks);
 
             var cts = new CancellationTokenSource();
             _cts = cts;
@@ -1589,6 +1590,24 @@ public partial class MainWindow : Window
         _liveLinks = links.ToArray();
         _appliedLinksSignature = LinksSignatureOf(links);
         UpdateLinkSummary();
+        RequestIspForLinks(_liveLinks);
+    }
+
+    /// <summary>
+    /// 立刻为**配置里的**每个链路目标登记运营商查询（不等探测出样本）。
+    ///
+    /// 之前只有"统计表里已经出现的行"才会去查，于是刚启动 / 某条链路还没探测成功时，
+    /// 目标运营商那一列是空的——看起来像"这个 IP 查不到运营商"。
+    /// </summary>
+    private void RequestIspForLinks(IEnumerable<LinkConfig> links)
+    {
+        if (_isp?.Enabled != true || IspCheck.IsChecked != true) return;
+
+        foreach (var link in links)
+        {
+            var host = IspAddressRules.HostPart(link.Host);
+            if (host.Length > 0) _isp.Request(host);
+        }
     }
 
     private static LinkConfig Clone(LinkConfig link) => new()

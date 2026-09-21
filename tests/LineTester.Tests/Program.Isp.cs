@@ -406,7 +406,11 @@ internal static partial class Program
 
                 var rows = (System.Collections.IList)GetPrivateField(window, "_stats")!;
                 WaitUntilPump(() => rows.Count > 0, 6000);
-                Check("统计表出现数据行", rows.Count > 0, rows.Count.ToString());
+                // 配置里的链路目标应当在**启动时**就登记查询（不等探测出样本），
+                // 否则刚启动时"目标运营商"那一列是空的，看起来像查不到
+                Check("启动时就为配置里的目标登记了查询（请求数 > 0）", fetcher.CallCount > 0, fetcher.CallCount.ToString());
+                Check("查询里包含配置的目标地址",
+                    fetcher[0].Contains("221.5.88.88"), string.Join(",", fetcher[0]));
 
                 if (rows.Count > 0)
                 {
