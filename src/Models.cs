@@ -210,6 +210,17 @@ public sealed class LinkConfig
     /// <summary>本地单独关掉 ICMP(ping) 的意图（注册链路）。</summary>
     public bool LocalIcmpOff { get; set; }
 
+    /// <summary>
+    /// 复制一份。
+    ///
+    /// 用 <see cref="object.MemberwiseClone"/> 而不是手写逐字段拷贝，是有代价换来的教训：
+    /// 界面里曾有一份手写的 <c>Clone(LinkConfig)</c>，加 ICMP 时漏了新字段，
+    /// 结果"启动约 1 秒后（防抖定时器把链路快照换成副本）ICMP 静默停止发包"，
+    /// TCP/UDP 因为字段还在所以完全正常——现场看到的就是"ping 只发两次就不发了"。
+    /// 放在模型旁边，以后再加协议字段不会再漏（自检里有反射用例守着"每个字段都被复制"）。
+    /// </summary>
+    public LinkConfig Clone() => (LinkConfig)MemberwiseClone();
+
     // 注意：不要在这里添加只读的派生属性（例如 Key / Target）。
     // System.Text.Json 会把公开的只读属性一起序列化，导致配置文件里出现
     // 程序自己都不读、现场看不懂的字段（保存一次就被写进去）。
@@ -461,6 +472,27 @@ public sealed class LinkRow : INotifyPropertyChanged
         return row;
     }
 
+    /// <summary>
+    /// 复制出一条新链路（界面的「新增」与「复制链路」共用）。
+    ///
+    /// 整行走 <see cref="ToConfig"/> + <see cref="FromConfig"/>，
+    /// 协议勾选（TCP / UDP / **ICMP**）与本地意图都会被带上——
+    /// 以前这里是手写几个字段，加 ICMP 时漏了，复制出来的链路 ICMP 永远不勾。
+    /// 但**不继承注册来源**：副本是手工链路，否则下一次同步会把它当"多出来的注册链路"删掉。
+    /// </summary>
+    public LinkRow CopyAsManual(string name)
+    {
+        var row = FromConfig(ToConfig());
+        row.Name = name;
+        row.Source = LinkSources.Manual;
+        row.NodeId = "";
+        row.LocalDisabled = false;
+        row.LocalTcpOff = false;
+        row.LocalUdpOff = false;
+        row.LocalIcmpOff = false;
+        return row;
+    }
+
     /// <summary>用配置（或注册中心下发的内容）刷新本行。协议勾选会被覆盖，来源字段一并带上。</summary>
     public void ApplyFrom(LinkConfig link)
     {
@@ -473,9 +505,10 @@ public sealed class LinkRow : INotifyPropertyChanged
         Udp = link.Udp;
         Icmp = link.Icmp;
         LocalDisabled = link.LocalDisabled;
-        LocalIcmpOff = link.LocalIcmpOff;
         LocalTcpOff = link.LocalTcpOff || link.LocalDisabled;
         LocalUdpOff = link.LocalUdpOff || link.LocalDisabled;
+        // 与 TCP/UDP 同一条规则：LocalDisabled 表示"整条链路都本地关掉"，三个协议一致对待
+        LocalIcmpOff = link.LocalIcmpOff || link.LocalDisabled;
     }
 
     /// <summary>用与配置文件校验完全相同的规则校验本行。</summary>

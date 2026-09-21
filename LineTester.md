@@ -7,7 +7,7 @@
 > 链路编辑器（含防误删）、界面重排、报文带对端源地址、失败原因分类、日志按天滚动 → 上传 GitHub（private）；
 > ② **链路注册协议 v1（多机房自动互测）** 全流程落地：规格 → 计划 → 三个切片（端口分流与中心服务、
 > 客户端同步循环与三节点端到端、注册设置页与中心节点管理 + 链路页联动），规格 §12 兼容矩阵逐行验证。
-> 自检从 **0 → 1172 项断言**，全程 `0 警告 0 错误`。
+> 自检从 **0 → 1205 项断言**，全程 `0 警告 0 错误`。
 
 ---
 
@@ -15,7 +15,7 @@
 
 > 读取 `E:\dsh\LineTester\LineTester.md`（本文件）与 `README.md`，然后：
 > ① `dotnet build .\LineTester.sln -c Release` 确认可编译（应为 0 警告 0 错误）；
-> ② `dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release` 跑自检（应 1172/1172 通过）；
+> ② `dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release` 跑自检（应 1205/1205 通过）；
 > ③ 改任何代码前先看本文件 **§4 关键设计约定** 与 **§5 本机环境坑**（这两节能避免重复踩坑）；
 > ④ 改注册协议/注册页前**先读 `docs/REGISTRY-PROTOCOL.md`**（协议契约的 SSOT，实现期修正已回写）。
 > 注意：**测试工程不在 .sln 里**（本机 SDK 损坏，见 §5.2），必须按路径构建/运行。
@@ -67,7 +67,7 @@
 | `src/IcmpPinger.cs` | ICMP ping：走 Windows `IcmpSendEcho`（不需管理员权限），失败原因分类与"禁 ping"提示 |
 | `src/AppLog.cs` | 关键流程日志（中心 / 客户端 / 配置三份，按天分目录，绝不记密钥） |
 | `src/LinkConfigDiff.cs` | "配置文件 ↔ 界面"逐条核对（现场"文件里有、界面里没有"的定位工具） |
-| `tests/LineTester.Tests/Program*.cs` | 零依赖自检宿主（1172 项断言，含真实回环网络、真实窗口端到端、注册协议、注册页、运营商判定、ICMP） |
+| `tests/LineTester.Tests/Program*.cs` | 零依赖自检宿主（1205 项断言，含真实回环网络、真实窗口端到端、注册协议、注册页、运营商判定、ICMP） |
 
 ---
 
@@ -289,7 +289,7 @@ git -c http.sslBackend=openssl -c http.proxy=http://127.0.0.1:17895 -c https.pro
 ## 8. 本次会话的验证证据
 
 - `dotnet build .\LineTester.sln -c Release` → **0 警告 0 错误**（每次改动后均重跑）
-- 自检 **1172/1172 通过**；收尾阶段每改一轮都重跑，现场反馈修复后 8 次、顶部节点名后 3 次连跑全绿
+- 自检 **1205/1205 通过**；收尾阶段每改一轮都重跑，现场反馈修复后 8 次、顶部节点名后 3 次连跑全绿
 - 现场反馈的三件事都有实测断言（不是靠肉眼看界面）：
   ① 运行中取消勾选 TCP → 用"能数包的纯回显服务端"确认对端**不再收到新的 TCP**，而 UDP 照常；
   ② "发 TCP 却显示 UDP" → 用"只开 TCP / 只开 UDP"两段实测：只开 TCP 时明细里全是 TCP 行、
@@ -335,7 +335,13 @@ git -c http.sslBackend=openssl -c http.proxy=http://127.0.0.1:17895 -c https.pro
   ④ **切片 2→3 交接处**：`LinkRow.ToConfig()` 没回写 `Source/NodeId/LocalDisabled`——界面保存一次就把注册链路退化成手工链路；
   ⑤ **节点身份每次保存被重新生成**——中心会把同一台机器当成新节点；
   ⑥ `RegistryStore.RefreshOnlineState()` 从未被调用——"在线"状态会永久停住（现已由中心组装 ACK 时与界面刷新时调用）；
-  ⑦ `Start()` 的同步循环与"立即注册"并发时抢同一个 socket 的回包 → 间歇性"中心无应答"（已加请求闸门）。
+  ⑦ `Start()` 的同步循环与"立即注册"并发时抢同一个 socket 的回包 → 间歇性"中心无应答"（已加请求闸门）；
+  ⑧ **现场反馈"ICMP 的 ping 包只发 2 次就不发了"**：链路快照的复制函数（当时是 `MainWindow` 里**手写的逐字段 Clone**）加 ICMP 时漏了新字段 →
+  启动约 1 秒后防抖定时器执行 `ApplyLiveLinks()`，把探测循环每轮读的链路快照换成副本，`Icmp` 从此永远是 `false`；
+  TCP/UDP 的字段还在，所以**只有 ICMP 停**，看起来像"ping 有自己的寿命"。
+  已把复制搬到模型旁边（`LinkConfig.Clone()` 用 `MemberwiseClone`）并加了**反射用例**守着"每个字段都被复制"；
+  同类漏字段的另外两处（新增/复制链路不复制 ICMP、`RegistrySync` 里 `LocalDisabled = tcpOff && udpOff` 未含 ICMP）一并修掉；
+  复现入口保留为 `--icmp-window <秒数>`（真实窗口 + 每秒打印各协议条数与三个开关取值）。
 - 收尾阶段被发现的**自检宿主自身缺陷**（不是产品缺陷）：`FindBindablePort()` 只试系统临时端口，
   Windows 顺序分配临时端口时若游标落进保留区间会连续失败 → 整轮自检以未处理异常崩掉（`exit=-532462766`）；
   已改为"临时端口失败后退回随机扫描"，并让 `Main` 捕获宿主异常统一按失败收场。

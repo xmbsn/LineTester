@@ -249,6 +249,16 @@ dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release
 | IPv6 | 目前只支持 IPv4 目标（IPv6 会明确报"只支持 IPv4"） |
 | 注册中心 | 「注册中心」页可勾「ICMP」（允许被 ping）。默认不勾——乱宣告会让别的节点把"对端禁 ping"当成线路故障（与「可被 TCP 探测」同理） |
 
+排查入口（不启动程序也能复现）：
+
+```bat
+:: 连续 ping 同一个目标，逐次打印结果（看"是不是发几次就停"）
+dotnet run --project .\tests\LineTester.Tests -c Release -- --icmp-loop 127.0.0.1 12 300 2000
+
+:: 真实窗口 + 真实探测循环跑 12 秒，每秒打印各协议累计条数与三个开关的当前取值
+dotnet run --project .\tests\LineTester.Tests -c Release -- --icmp-window 12
+```
+
 ### 多机房自动互测（注册中心）
 
 N 个机房两两互测需要 N×(N-1) 条链路，手工录入随 N² 增长。启用注册后，
@@ -404,7 +414,7 @@ dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release
 
 > 两点说明：
 > 1. 本机无法访问 nuget.org，因此没有使用 xunit 等需要联网还原的框架，
->    而是用一个控制台断言宿主实现同等覆盖（当前 1172 项断言）。
+>    而是用一个控制台断言宿主实现同等覆盖（当前 1205 项断言）。
 > 2. 测试工程**没有**加进 `LineTester.sln`。本机 .NET SDK 的工作负载子系统损坏
 >    （`Sdks\Microsoft.NET.SDK.Workload*Locator` 缺失、`dotnet --info` 列工作负载即崩溃），
 >    导致**任何多项目解决方案**的还原都会失败；单项目解决方案与按路径构建/运行均正常。

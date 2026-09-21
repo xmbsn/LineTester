@@ -91,7 +91,9 @@ public static class RegistrySync
                     ? false
                     : current.LocalIcmpOff || current.LocalDisabled;
 
-                var localDisabled = tcpOff && udpOff;
+                // LocalDisabled 的语义是"整条链路都本地关掉"，必须三个协议都关才算
+                // （只关 TCP+UDP 时若也置位，下一次同步会把 ICMP 一起关掉——加 ICMP 时漏改过）
+                var localDisabled = tcpOff && udpOff && icmpOff;
                 var tcp = node.Tcp && !tcpOff;
                 var udp = node.Udp && !udpOff;
                 var icmp = node.Icmp && !icmpOff;

@@ -52,6 +52,20 @@ internal static partial class Program
             return IspWindowLive(args[1], ispPort, args.Any(a => a == "--poison"));
         }
 
+        // 连续 ping 同一目标（人工排查"只发了几次就不发了"这类连续性问题）
+        if (args.Length >= 3 && args[0] == "--icmp-loop" && int.TryParse(args[2], out var icmpCount))
+        {
+            var icmpInterval = args.Length >= 4 && int.TryParse(args[3], out var iv) ? iv : 300;
+            var icmpTimeout = args.Length >= 5 && int.TryParse(args[4], out var tv) ? tv : 2000;
+            return IcmpLoop(args[1], icmpCount, icmpInterval, icmpTimeout);
+        }
+
+        // 真实窗口 + 真实探测循环跑一段时间，每秒打印各协议累计条数与开关状态
+        if (args.Length >= 2 && args[0] == "--icmp-window" && int.TryParse(args[1], out var icmpSeconds))
+        {
+            return IcmpWindow(icmpSeconds);
+        }
+
         Console.WriteLine("LineTester 自检");
         Console.WriteLine(new string('=', 64));
 
@@ -94,7 +108,9 @@ internal static partial class Program
             TestLinkToggleWhileRunning();
             await TestRegistryCompatMatrixAsync();
             TestRepoTemplateLoads();
+            TestLinkConfigCloneIsComplete();
             TestIcmpPing();
+            TestIcmpKeepsSending();
             TestIcmpProbe();
             TestIcmpRegistry();
             TestIcmpUi();

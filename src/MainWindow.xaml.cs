@@ -550,14 +550,7 @@ public partial class MainWindow : Window
 
         var row = template is null
             ? new LinkRow { Name = $"机房{_linkRows.Count + 1}", Host = "", PortText = "9001" }
-            : new LinkRow
-            {
-                Name = template.Name + "-副本",
-                Host = template.Host,
-                PortText = template.PortText,
-                Tcp = template.Tcp,
-                Udp = template.Udp
-            };
+            : template.CopyAsManual(template.Name + "-副本");
 
         AddLinkRow(row);
         RevalidateLinks();
@@ -578,14 +571,7 @@ public partial class MainWindow : Window
         LinkRow? last = null;
         foreach (var source in selected)
         {
-            last = new LinkRow
-            {
-                Name = source.Name + "-副本",
-                Host = source.Host,
-                PortText = source.PortText,
-                Tcp = source.Tcp,
-                Udp = source.Udp
-            };
+            last = source.CopyAsManual(source.Name + "-副本");
             AddLinkRow(last);
         }
 
@@ -1619,17 +1605,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private static LinkConfig Clone(LinkConfig link) => new()
-    {
-        Name = link.Name,
-        Host = link.Host,
-        Port = link.Port,
-        Tcp = link.Tcp,
-        Udp = link.Udp,
-        Source = link.Source,
-        NodeId = link.NodeId,
-        LocalDisabled = link.LocalDisabled
-    };
+    private static LinkConfig Clone(LinkConfig link) => link.Clone();
 
     /// <summary>
     /// 只改协议勾选时**立刻**作用到运行中的链路：它只会"收窄"发包范围，
