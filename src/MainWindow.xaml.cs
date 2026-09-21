@@ -94,6 +94,9 @@ public partial class MainWindow : Window
     private RegistryStore? _registryStore;
     private RegistryCenterService? _registryCenter;
 
+    /// <summary>当前同步客户端"登记在案"的注册参数签名：变了就重建客户端，让中心立刻看到新值。</summary>
+    private string _registryClientSignature = "";
+
     // ---- 运营商查询（跨运营商判定）----
 
     private IspLookupService? _isp;
@@ -139,8 +142,64 @@ public partial class MainWindow : Window
         Loaded += (_, _) =>
         {
             if (_configLoadError is not null) ShowConfigError(_configLoadError);
+
+            // 启动就说清"在用哪份配置"（并提示多实例）：现场"改了保存、重启又变回去"
+            // 最常见的原因就是启动的不是同一份程序
+            ShowConfigLocation();
         };
     }
+
+    /// <summary>
+    /// 启动时把"正在使用哪份配置"明写出来。
+    ///
+    /// 现场踩过：改了配置、保存、重启后"又变回去了"——实际是**启动的不是同一份程序**
+    /// （不同目录各有一份 appsettings.json，读的是那份旧的）。把路径显示出来，
+    /// 这类问题 5 秒就能看清，不用猜。
+    /// </summary>
+    private void ShowConfigLocation()
+    {
+        var note = "配置文件：" + ConfigManager.ConfigPath;
+
+        var others = OtherInstanceCount();
+        if (others > 0)
+        {
+            note = $"⚠ 检测到另外 {others} 个 LineTester 实例（同一份配置）：两个实例保存会互相覆盖，建议只留一个。"
+                   + "  " + note;
+        }
+
+        UpdateStatus(note);
+    }
+
+    /// <summary>统计"用同一个程序路径在跑"的其它实例数（同一个目录 = 同一份配置）。</summary>
+    private static int OtherInstanceCount()
+    {
+        try
+        {
+            var self = Process.GetCurrentProcess();
+            var path = self.MainModule?.FileName ?? "";
+            if (path.Length == 0) return 0;
+
+            return Process.GetProcessesByName(self.ProcessName)
+                .Count(p =>
+                {
+                    try
+                    {
+                        return p.Id != self.Id &&
+                               string.Equals(p.MainModule?.FileName ?? "", path, StringComparison.OrdinalIgnoreCase);
+                    }
+                    catch
+                    {
+                        return false;
+                    }
+                });
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    private void WarnIfAnotherInstance() => ShowConfigLocation();
 
     // ---------------- 配置 ----------------
 
@@ -249,23 +308,31 @@ public partial class MainWindow : Window
         if (e.PropertyName is nameof(LinkRow.Problem) or nameof(LinkRow.IsValid) or nameof(LinkRow.Diagnosis)
             or nameof(LinkRow.IsRegistry) or nameof(LinkRow.SourceText) or nameof(LinkRow.LocalDisabled)) return;
 
-        // 注册链路：TCP 与 UDP 都取消勾选 = 本地停测意图（规格 §8.5）。
-        // 它必须写回配置：否则下一次同步会把"取消勾选"当成需要纠正的偏差，又给你勾回来。
+        // 注册链路：本端对协议的勾选是"本地意图"，必须写回配置——
+        // 否则下一次同步会按中心宣告的值把它改回来（现场反馈的"取消勾选 TCP，重启又勾上了"）。
         if (sender is LinkRow { IsRegistry: true } registryRow &&
             e.PropertyName is nameof(LinkRow.Tcp) or nameof(LinkRow.Udp))
         {
             var disabled = !registryRow.Tcp && !registryRow.Udp;
 
-            if (registryRow.LocalDisabled != disabled)
+            var changed = registryRow.LocalTcpOff != !registryRow.Tcp ||
+                          registryRow.LocalUdpOff != !registryRow.Udp ||
+                          registryRow.LocalDisabled != disabled;
+
+            if (changed)
             {
+                registryRow.LocalTcpOff = !registryRow.Tcp;
+                registryRow.LocalUdpOff = !registryRow.Udp;
                 registryRow.LocalDisabled = disabled;
+
                 UpdateStatus(disabled
                     ? $"「{registryRow.Name}」已本地停测：注册同步不会覆盖这个意图，重新勾选任一协议即恢复"
-                    : $"「{registryRow.Name}」已恢复本地探测（协议以注册中心下发的为准）");
+                    : $"「{registryRow.Name}」本地协议选择已记录（{(registryRow.Tcp ? "TCP" : "TCP 关")}/" +
+                      $"{(registryRow.Udp ? "UDP" : "UDP 关")}），注册同步不会覆盖");
             }
 
-            // 恢复探测时立刻同步一次，否则要等一个同步周期才拿回对端宣告的协议
-            if (!disabled && _registryClient is not null) _ = _registryClient.RegisterNowAsync();
+            // 改过协议选择后立刻同步一次，让状态尽早与中心一致
+            if (_registryClient is not null) _ = _registryClient.RegisterNowAsync();
         }
         else if (sender is LinkRow toggledRow &&
                  e.PropertyName is nameof(LinkRow.Tcp) or nameof(LinkRow.Udp) &&
@@ -626,11 +693,13 @@ public partial class MainWindow : Window
         if (current is null || _configStamp is null || current.Value == _configStamp.Value) return true;
 
         var answer = MessageBox.Show(
-            "配置文件已被其它程序修改：\n" + ConfigManager.ConfigPath + "\n\n" +
+            "配置文件已被其它程序或另一个实例修改：\n" + ConfigManager.ConfigPath + "\n\n" +
             "是：重新加载文件（放弃界面上的修改）\n" +
             "否：用界面当前值覆盖文件\n" +
-            "取消：放弃本次操作",
-            "配置已变更", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
+            "取消：放弃本次操作（推荐先点「打开配置文件」看看是谁改的）",
+            "配置已变更", MessageBoxButton.YesNoCancel, MessageBoxImage.Question,
+            // 默认按钮给"取消"：以前默认是"是=放弃界面修改"，一个回车就把用户刚改的东西丢了
+            MessageBoxResult.Cancel);
 
         switch (answer)
         {
@@ -650,7 +719,11 @@ public partial class MainWindow : Window
         if (!ResolveExternalConfigChange()) return;
         if (!TrySaveConfig()) return;
 
-        UpdateStatus($"配置已保存 → {ConfigManager.ConfigPath}");
+        // 注册配置变了 → 立刻重建同步客户端，否则中心/其他节点看到的还是旧值
+        var restarted = RestartRegistryClientIfChanged();
+
+        UpdateStatus($"配置已保存 → {ConfigManager.ConfigPath}" +
+                     (restarted ? "；检测到注册配置变化，已重新注册（中心会立刻看到新值）" : ""));
     }
 
     private void OpenConfig_Click(object sender, RoutedEventArgs e)
@@ -669,6 +742,28 @@ public partial class MainWindow : Window
             MessageBox.Show("打开配置文件失败：" + ex.Message, "打开失败",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
         }
+    }
+
+    /// <summary>
+    /// 「重新加载配置」：把磁盘上的内容读回界面（丢弃界面上未保存的修改，先确认）。
+    /// 用途：确认过别人/另一个实例改过这份配置，想看看它现在是什么。
+    /// </summary>
+    private void ReloadConfig_Click(object sender, RoutedEventArgs e)
+    {
+        if (!string.Equals(LinksSignature(), _savedLinksSignature, StringComparison.Ordinal))
+        {
+            var answer = MessageBox.Show(
+                "界面上有未保存的修改，重新加载会丢弃它们。\n\n确定要重新加载吗？\n\n" +
+                ConfigManager.ConfigPath,
+                "重新加载配置", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No);
+
+            if (answer != MessageBoxResult.Yes) return;
+        }
+
+        LoadConfigFromDisk(showError: true);
+
+        if (_configLoadError is null)
+            UpdateStatus("已重新加载配置（丢弃了界面未保存的修改）：" + ConfigManager.ConfigPath);
     }
 
     // ---------------- 运行控制 ----------------
@@ -864,6 +959,41 @@ public partial class MainWindow : Window
         }
 
         _registryClient = client;
+        _registryClientSignature = RegistryClientSignature();
+    }
+
+    /// <summary>
+    /// 注册客户端用到的全部参数。任何一项变了，都必须**重建客户端**——
+    /// 客户端在 Start 时把参数抓成 Options，改配置不重建的话，中心收到的永远是旧值
+    /// （现场就是"改了配置，注册中心那边还是老链路信息"）。
+    /// </summary>
+    private string RegistryClientSignature()
+    {
+        var r = _settings.Registrar;
+        return string.Join("|",
+            r.NodeId, r.NodeName, r.PublicHost, r.PublicPort.ToString(),
+            string.Join(",", r.PublicHosts ?? new List<string>()),
+            r.AdvertiseTcp.ToString(), r.AdvertiseUdp.ToString(), r.Distributable.ToString(),
+            r.CenterHost, r.CenterPort.ToString(), r.Secret,
+            r.HeartbeatSeconds.ToString(), r.SyncSeconds.ToString(),
+            r.RetryMs.ToString(), r.MaxRetries.ToString());
+    }
+
+    /// <summary>
+    /// 注册配置改了（保存配置 / 立即注册时调用）：重建同步客户端并立刻注册一次。
+    /// 返回是否真的重建了。
+    /// </summary>
+    private bool RestartRegistryClientIfChanged()
+    {
+        if (!_settings.Registrar.Enabled) return false;
+        if (_registryClient is null) return false;
+        if (_registryClientSignature == RegistryClientSignature()) return false;
+
+        var notes = new List<string>();
+        StopRegistryClient();
+        StartRegistryClient(notes);
+
+        return _registryClient is not null;
     }
 
     private void StopRegistryClient()
@@ -1013,6 +1143,10 @@ public partial class MainWindow : Window
 
     private async Task RegisterNowAndRefreshAsync()
     {
+        // 界面上刚改过注册参数（例如「可被探测的协议」）而客户端还拿着旧 Options 时，
+        // 先重建客户端再发，"立即注册"才会把新值送到中心
+        RestartRegistryClientIfChanged();
+
         var client = _registryClient;
         if (client is null)
         {
@@ -1286,7 +1420,25 @@ public partial class MainWindow : Window
         RefreshStats();
         UpdateNodeNameDisplay();
         RefreshRegistryUi();
+        WarnOnExternalConfigChange();
         RefreshStatusBar();
+    }
+
+    /// <summary>
+    /// 配置文件在运行期间被别的程序/另一个实例改了 → 状态栏明确提示。
+    ///
+    /// 不说的话用户会以为"我保存过了"，而界面上显示的其实是旧内容，下一次保存还会把对方的修改覆盖掉。
+    /// </summary>
+    private void WarnOnExternalConfigChange()
+    {
+        if (_configLoadError is not null) return;
+
+        var current = ConfigManager.Stamp();
+        if (current is null || _configStamp is null || current.Value == _configStamp.Value) return;
+
+        _statusNote = "⚠ 配置文件已被其它程序或另一个实例修改（界面显示的是旧内容）：点「重新加载配置」读取新内容，" +
+                      "或直接「保存配置」用界面当前值覆盖。  " + ConfigManager.ConfigPath;
+        _statusIsError = false;
     }
 
     /// <summary>

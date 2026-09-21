@@ -79,9 +79,18 @@ public static class RegistrySync
 
                 currentByKey.TryGetValue(Key(node.NodeId, ip), out var current);
 
-                var localDisabled = current?.LocalDisabled ?? false;
-                var tcp = node.Tcp && !localDisabled;
-                var udp = node.Udp && !localDisabled;
+                // 本地意图：老配置只有 LocalDisabled（两个都不勾），新配置可以单独关一个协议。
+                // 迁移规则：LocalDisabled=true 视为两个协议都本地关掉。
+                var tcpOff = current is null
+                    ? false
+                    : current.LocalTcpOff || current.LocalDisabled;
+                var udpOff = current is null
+                    ? false
+                    : current.LocalUdpOff || current.LocalDisabled;
+
+                var localDisabled = tcpOff && udpOff;
+                var tcp = node.Tcp && !tcpOff;
+                var udp = node.Udp && !udpOff;
 
                 if (current is null)
                 {
@@ -105,7 +114,9 @@ public static class RegistrySync
                     Udp = udp,
                     Source = LinkSources.Registry,
                     NodeId = node.NodeId,
-                    LocalDisabled = localDisabled
+                    LocalDisabled = localDisabled,
+                    LocalTcpOff = tcpOff,
+                    LocalUdpOff = udpOff
                 });
             }
         }

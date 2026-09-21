@@ -26,7 +26,7 @@ public sealed class RegistryNodeRow : INotifyPropertyChanged
     private RegistryNodeRow(
         string nodeId, string name, string address, string protocols, string lastSeen,
         bool online, bool distributable, bool authenticated, bool duplicateSuspected,
-        bool centerHidden, bool removed, Func<string, bool, bool> setCenterHidden)
+        bool centerHidden, bool removed, Func<string, bool, bool> setCenterHidden, bool longOffline = false)
     {
         _setCenterHidden = setCenterHidden;
 
@@ -42,6 +42,7 @@ public sealed class RegistryNodeRow : INotifyPropertyChanged
         _duplicateSuspected = duplicateSuspected;
         _centerHidden = centerHidden;
         IsRemoved = removed;
+        LongOffline = longOffline;
     }
 
     /// <param name="setCenterHidden">参数为 (nodeId, hidden)，返回是否真的改动了中心清单。</param>
@@ -54,7 +55,10 @@ public sealed class RegistryNodeRow : INotifyPropertyChanged
             RegistryUiText.DescribeProtocols(node.Tcp, node.Udp),
             RegistryUiText.DescribeLastSeen(node.LastSeenUtc, nowUtc),
             node.Online, node.Distributable, node.Authenticated, node.DuplicateSuspected, node.CenterHidden, false,
-            setCenterHidden);
+            setCenterHidden,
+            // 长期离线（>7 天没有心跳）：这些行往往已经不会再回来，却会让所有节点一直维持到它的链路。
+            // 判据只看"多久没心跳"，不依赖 Online 标志——那个标志要等中心刷新才会更新。
+            nowUtc - node.LastSeenUtc > TimeSpan.FromDays(7));
 
     /// <summary>已被中心移除、仍在移除名单里的节点。</summary>
     public static RegistryNodeRow FromRemoved(string nodeId, Func<string, bool, bool> setCenterHidden)
@@ -69,6 +73,12 @@ public sealed class RegistryNodeRow : INotifyPropertyChanged
 
     /// <summary>true = 已被中心移除（只能"恢复"，不能再移除一次）。</summary>
     public bool IsRemoved { get; }
+
+    /// <summary>节点身份前 8 位：用来发现"同一台机器的历史遗留旧身份"（重复行）。</summary>
+    public string ShortId => NodeId.Length <= 8 ? NodeId : NodeId[..8];
+
+    /// <summary>是否长期离线（&gt; 7 天）：这类行往往是换过配置/去掉了的机器，链路在别人那里一直重建。</summary>
+    public bool LongOffline { get; private init; }
 
     /// <summary>「分发」勾选框是否可写：已移除的节点不可写。</summary>
     public bool CanDistribute => !IsRemoved;

@@ -299,6 +299,11 @@ public partial class RegistryPanel : UserControl
 
         var removed = store.RemovedNodeIds.Count;
         RestoreNodeButton.IsEnabled = removed > 0;
+
+        var longOffline = _nodeRows.Count(r => r.LongOffline);
+        PurgeOfflineButton.IsEnabled = longOffline > 0;
+        PurgeOfflineButton.Content = longOffline == 0 ? "清理长期离线" : $"清理长期离线（{longOffline}）";
+
         RemovedNodesText.Text = removed == 0
             ? "移除名单为空。"
             : $"已被移除（不会被心跳加回）：{string.Join("、", store.RemovedNodeIds.Take(5))}" +
@@ -366,6 +371,43 @@ public partial class RegistryPanel : UserControl
         ShowCenter(_store, DateTime.UtcNow, force: true);
         CenterChanged?.Invoke();
         Alert($"已恢复 {count} 个节点。它们会在下一次心跳后重新出现在清单里。", "恢复节点");
+    }
+
+    /// <summary>
+    /// 「清理长期离线」：把离线超过 7 天、且不参与分发的节点从清单移除（进入移除名单，可恢复）。
+    ///
+    /// 为什么需要：中心对离线节点**只标记不删除**（临时断网不该让链路从所有人那里消失），
+    /// 但换过配置/退役的机器会留下"历史节点"——它在所有子节点上一直维持一条到旧地址的链路，
+    /// 现场看到的就是"我本地删了它，过一会儿又回来了"（其实是中心还在分发那个旧节点）。
+    /// 有了节点身份短号，重复的历史行也能一眼看出来。
+    /// </summary>
+    private void PurgeOffline_Click(object sender, RoutedEventArgs e)
+    {
+        if (_store is null)
+        {
+            Alert("注册中心未运行：先点“启动测试”，并勾选“本机同时承担注册中心角色”。", "清理长期离线");
+            return;
+        }
+
+        var targets = _nodeRows.Where(r => r.LongOffline && !r.IsRemoved).ToList();
+        if (targets.Count == 0)
+        {
+            Alert("当前没有长期离线（>7 天）的节点。", "清理长期离线");
+            return;
+        }
+
+        var message = $"以下 {targets.Count} 个节点已离线超过 7 天，将从中心清单移除：" +
+                      $"\n\n{string.Join("\n", targets.Take(8).Select(r => $"· {r.Name}（{r.Address}｜ID {r.ShortId}）"))}" +
+                      (targets.Count > 8 ? $"\n… 等 {targets.Count} 个" : "") +
+                      "\n\n影响：这些节点会从**所有子节点**的链路列表里消失；它们继续心跳也不会被加回来，" +
+                      "需要在「恢复所选移除」里恢复。\n\n不会删除对端程序与配置，也不影响本机探测。";
+
+        if (!Confirm(message, "清理长期离线（权威删除）")) return;
+
+        var count = targets.Count(row => _store.RemoveNode(row.NodeId));
+        ShowCenter(_store, DateTime.UtcNow, force: true);
+        CenterChanged?.Invoke();
+        Alert($"已移除 {count} 个长期离线节点。其他节点会在各自的同步周期内删除对应链路。", "清理长期离线");
     }
 
     // ---------------- 小工具 ----------------

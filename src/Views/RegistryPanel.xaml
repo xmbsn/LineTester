@@ -293,15 +293,18 @@
                               BorderBrush="#E1E4E8" BorderThickness="1"
                               GridLinesVisibility="Horizontal" HorizontalGridLinesBrush="#EEF0F2">
                         <DataGrid.Columns>
-                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="170"/>
-                            <DataGridTextColumn Header="地址" Binding="{Binding Address}" Width="190"/>
-                            <DataGridTextColumn Header="协议" Binding="{Binding Protocols}" Width="110"/>
-                            <DataGridTextColumn Header="最后心跳" Binding="{Binding LastSeen}" Width="170"/>
+                            <DataGridTextColumn Header="名称" Binding="{Binding Name}" Width="150"/>
+                            <DataGridTextColumn Header="节点 ID" Binding="{Binding ShortId}" Width="74"
+                                                ToolTipService.ToolTip="节点身份前 8 位：同一台机器出现多行（历史遗留身份）时能一眼看出"/>
+                            <DataGridTextColumn Header="地址" Binding="{Binding Address}" Width="170"/>
+                            <DataGridTextColumn Header="协议" Binding="{Binding Protocols}" Width="96"/>
+                            <DataGridTextColumn Header="最后心跳" Binding="{Binding LastSeen}" Width="160"/>
                             <DataGridTextColumn Header="状态" Binding="{Binding State}" Width="*" MinWidth="200"/>
-                            <DataGridTemplateColumn Header="分发" Width="60">
+                            <DataGridTemplateColumn Header="分发" Width="56">
                                 <DataGridTemplateColumn.CellTemplate>
                                     <DataTemplate>
                                         <CheckBox IsChecked="{Binding Distributed, UpdateSourceTrigger=PropertyChanged}"
+                                                  IsEnabled="{Binding CanDistribute}"
                                                   HorizontalAlignment="Center" VerticalAlignment="Center"
                                                   ToolTip="取消勾选：该节点不再出现在任何子节点的链路里"/>
                                     </DataTemplate>
@@ -317,6 +320,9 @@
                         <Button x:Name="RestoreNodeButton" Style="{StaticResource RegButton}" Content="恢复所选移除"
                                 Click="RestoreNode_Click" IsEnabled="False"
                                 ToolTip="把已移除的节点从移除名单里去掉，它会在下一次心跳重新出现"/>
+                        <Button x:Name="PurgeOfflineButton" Style="{StaticResource RegButton}" Content="清理长期离线"
+                                Click="PurgeOffline_Click" IsEnabled="False"
+                                ToolTip="把离线超过 7 天的节点从清单移除：换过配置/退役的机器会留下历史节点，导致所有子节点一直维持到旧地址的链路"/>
                     </StackPanel>
 
                     <TextBlock x:Name="RemovedNodesText" Style="{StaticResource RegHint}"/>

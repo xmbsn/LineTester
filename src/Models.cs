@@ -179,6 +179,15 @@ public sealed class LinkConfig
     /// </summary>
     public bool LocalDisabled { get; set; }
 
+    /// <summary>
+    /// 本地单独关掉 TCP 的意图（注册链路）。中心宣告 TCP 可用、但本端只想测 UDP 时用；
+    /// **同步不会覆盖它**——曾经只有"两个都不勾"才能持久，单独取消勾选 TCP 会被下一次同步改回去。
+    /// </summary>
+    public bool LocalTcpOff { get; set; }
+
+    /// <summary>本地单独关掉 UDP 的意图（注册链路）。</summary>
+    public bool LocalUdpOff { get; set; }
+
     // 注意：不要在这里添加只读的派生属性（例如 Key / Target）。
     // System.Text.Json 会把公开的只读属性一起序列化，导致配置文件里出现
     // 程序自己都不读、现场看不懂的字段（保存一次就被写进去）。
@@ -265,6 +274,8 @@ public sealed class LinkRow : INotifyPropertyChanged
     private string _source = LinkSources.Manual;
     private string _nodeId = "";
     private bool _localDisabled;
+    private bool _localTcpOff;
+    private bool _localUdpOff;
 
     public string Name { get => _name; set => Set(ref _name, value); }
     public string Host { get => _host; set => Set(ref _host, value); }
@@ -342,6 +353,20 @@ public sealed class LinkRow : INotifyPropertyChanged
         set { if (Set(ref _localDisabled, value)) Raise(nameof(Diagnosis)); }
     }
 
+    /// <summary>本地单独关掉 TCP 的意图（注册链路）；同步不会覆盖。</summary>
+    public bool LocalTcpOff
+    {
+        get => _localTcpOff;
+        set { if (Set(ref _localTcpOff, value)) Raise(nameof(Diagnosis)); }
+    }
+
+    /// <summary>本地单独关掉 UDP 的意图（注册链路）；同步不会覆盖。</summary>
+    public bool LocalUdpOff
+    {
+        get => _localUdpOff;
+        set { if (Set(ref _localUdpOff, value)) Raise(nameof(Diagnosis)); }
+    }
+
     /// <summary>
     /// 「校验」列的显示文本：错误优先，其次给出注册链路的备注
     /// （本地停测 / 由中心自动维护），避免这一列在正常时整片空白。
@@ -352,7 +377,12 @@ public sealed class LinkRow : INotifyPropertyChanged
         {
             if (!IsValid) return Problem;
             if (!IsRegistry) return Problem;
-            return LocalDisabled ? "本地已停测（不会被同步覆盖）" : "来自注册中心（自动维护）";
+
+            if (LocalDisabled) return "本地已停测（不会被同步覆盖）";
+            if (LocalTcpOff) return "本地已关 TCP（不会被同步覆盖）";
+            if (LocalUdpOff) return "本地已关 UDP（不会被同步覆盖）";
+
+            return "来自注册中心（自动维护）";
         }
     }
 
@@ -375,7 +405,9 @@ public sealed class LinkRow : INotifyPropertyChanged
         Udp = Udp,
         Source = Source,
         NodeId = NodeId,
-        LocalDisabled = LocalDisabled
+        LocalDisabled = LocalDisabled,
+        LocalTcpOff = LocalTcpOff,
+        LocalUdpOff = LocalUdpOff
     };
 
     public static LinkRow FromConfig(LinkConfig link)
@@ -396,6 +428,8 @@ public sealed class LinkRow : INotifyPropertyChanged
         Tcp = link.Tcp;
         Udp = link.Udp;
         LocalDisabled = link.LocalDisabled;
+        LocalTcpOff = link.LocalTcpOff || link.LocalDisabled;
+        LocalUdpOff = link.LocalUdpOff || link.LocalDisabled;
     }
 
     /// <summary>用与配置文件校验完全相同的规则校验本行。</summary>

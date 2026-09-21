@@ -74,7 +74,9 @@ internal static partial class Program
             TestIpv4Box();
             TestRegistryPanelUi();
             TestRegistryMainWindowUi();
+            TestRegistryLocalProtocolIntent();
             TestRegistryMultiAddress();
+            TestSaveAndRestartRoundTrip();
             TestNodeNameHeader();
             TestIspCarrier();
             TestIspResponseParsing();
@@ -370,7 +372,7 @@ internal static partial class Program
 
                 var actualLink = doc.RootElement.GetProperty("Links")[0].EnumerateObject()
                     .Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
-                var expectedLink = new[] { "Host", "LocalDisabled", "Name", "NodeId", "Port", "Source", "Tcp", "Udp" };
+                var expectedLink = new[] { "Host", "LocalDisabled", "LocalTcpOff", "LocalUdpOff", "Name", "NodeId", "Port", "Source", "Tcp", "Udp" };
                 Check("链路字段与配置契约完全一致（不含 Key/Target 等派生字段）",
                     actualLink.SequenceEqual(expectedLink), string.Join(",", actualLink));
             }

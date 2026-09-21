@@ -1180,6 +1180,246 @@ internal static partial class Program
         return null;
     }
 
+    // ---------------- 保存与重启（现场反馈：改了保存，重启又回来） ----------------
+
+    /// <summary>
+    /// 现场反馈：在链路配置里取消勾选 TCP（或删掉一条链路）→ 点保存配置 → 重启客户端，
+    /// TCP 又是勾上的、被删的链路又回来了。
+    ///
+    /// 这条链路必须整体验证一遍：**保存真的写进了文件**，且**重启读回来与文件一致**。
+    /// 任何一环出问题，现场看到的就是"改了没用"。
+    /// </summary>
+    private static void TestSaveAndRestartRoundTrip()
+    {
+        Section("保存配置与重启：取消勾选 / 删除链路 / 改端口 都必须落盘并在重启后保持");
+
+        var root = Path.Combine(AppContext.BaseDirectory, ".testtmp", "save_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        var previousOverride = ConfigManager.OverridePath;
+        ConfigManager.OverridePath = Path.Combine(root, "appsettings.json");
+
+        ConfigManager.Save(new AppConfig
+        {
+            ListenPort = FindBindablePort(),
+            Links =
+            {
+                new LinkConfig { Name = "文一西路", Host = "115.231.111.101", Port = 16298, Tcp = true, Udp = true },
+                new LinkConfig { Name = "要删掉的", Host = "203.0.113.77", Port = 9000, Tcp = true, Udp = true }
+            }
+        });
+
+        RunOnSta(() =>
+        {
+            // ---- 第一次启动：改界面并保存 ----
+            var window = new MainWindow();
+            var rows = (System.Collections.IList)GetPrivateField(window, "_linkRows")!;
+            Eq("启动时读入 2 条链路", 2, rows.Count);
+
+            var keep = rows.Cast<LinkRow>().First(r => r.Name == "文一西路");
+            keep.Tcp = false;                      // 取消勾选 TCP
+            keep.PortText = "16299";               // 顺手改个端口
+
+            // 删掉第二条
+            var deleteThis = rows.Cast<LinkRow>().First(r => r.Name == "要删掉的");
+            var grid = (DataGrid)window.FindName("LinksGrid")!;
+            grid.SelectedItems.Clear();
+            grid.SelectedItems.Add(deleteThis);
+            SetPrivateField(window, "_confirmDelete", (Func<string, string, bool>)((_, _) => true));
+            SetPrivateField(window, "_alert", (Action<string, string>)((_, _) => { }));
+            InvokePrivateHandler(window, "DeleteLink_Click");
+            Eq("界面上删掉后剩 1 条", 1, rows.Count);
+
+            InvokePrivateHandler(window, "SaveConfig_Click");
+            window.Close();
+
+            // ---- 文件里必须已经写对 ----
+            var saved = ConfigManager.Load(out var loadError);
+            Eq("保存后文件可读", "", loadError ?? "");
+            Eq("文件里只剩 1 条链路（删除已落盘）", 1, saved.Links.Count);
+            Eq("文件里的链路名", "文一西路", saved.Links[0].Name);
+            Check("文件里 TCP 已取消勾选（没有又变回 true）", !saved.Links[0].Tcp, saved.Links[0].Tcp.ToString());
+            Check("文件里 UDP 保持勾选", saved.Links[0].Udp);
+            Eq("文件里端口已更新", 16299, saved.Links[0].Port);
+
+            // ---- 重启：界面必须与文件一致 ----
+            var restarted = new MainWindow();
+            var restartRows = (System.Collections.IList)GetPrivateField(restarted, "_linkRows")!;
+            Eq("重启后仍是 1 条链路（被删的没有恢复）", 1, restartRows.Count);
+            var restored = (LinkRow)restartRows[0]!;
+            Eq("重启后链路名", "文一西路", restored.Name);
+            Check("重启后 TCP 仍是未勾选", !restored.Tcp, restored.Tcp.ToString());
+            Check("重启后 UDP 仍是勾选", restored.Udp);
+            Eq("重启后端口", "16299", restored.PortText);
+            Eq("重启后「生效」列只显示 UDP", "UDP", restored.Effective);
+            Check("重启后链路仍然合法", restored.IsValid, restored.Problem);
+
+            restarted.Close();
+        }, "保存与重启断言");
+
+        // ---- 配置路径可见性 / 外部修改提示 / 重新加载 ----
+        RunOnSta(() =>
+        {
+            var window = new MainWindow();
+            var note = (TextBlock)window.FindName("StatusNote")!;
+
+            // 窗口没 Show() 时 Loaded 不会触发 → 直接调用它做的事（ShowConfigLocation）
+            typeof(MainWindow).GetMethod("ShowConfigLocation", BindingFlags.NonPublic | BindingFlags.Instance)!
+                .Invoke(window, null);
+            Pump(200);
+            Check("启动后状态栏写明正在使用哪份配置",
+                note.Text.Contains("配置文件：") && note.Text.Contains("appsettings.json"), note.Text);
+            Check("状态栏里的配置路径就是程序目录那份",
+                note.Text.Contains(ConfigManager.ConfigPath), note.Text);
+            Check("存在「重新加载配置」按钮", window.FindName("ReloadConfigButton") is Button);
+
+            // 外部改动 → 状态栏提示（模拟另一个实例/记事本改了它）
+            var external = ConfigManager.Load(out _);
+            external.Links.Add(new LinkConfig { Name = "别人加的", Host = "203.0.113.200", Port = 9000 });
+            ConfigManager.Save(external);
+
+            Pump(1200); // 等一个 UI tick
+            Check("检测到配置被外部修改后给出提示",
+                note.Text.Contains("已被其它程序或另一个实例修改"), note.Text);
+
+            // 点「重新加载配置」→ 界面读回外部内容
+            InvokePrivateHandler(window, "ReloadConfig_Click");
+            Pump(300);
+
+            var rows = (System.Collections.IList)GetPrivateField(window, "_linkRows")!;
+            Check("重新加载后界面拿到了外部新增的链路",
+                rows.Cast<LinkRow>().Any(r => r.Name == "别人加的"),
+                string.Join(",", rows.Cast<LinkRow>().Select(r => r.Name)));
+            Check("重新加载后状态栏提示已加载",
+                note.Text.Contains("已重新加载配置"), note.Text);
+
+            window.Close();
+        }, "配置路径与外部修改断言");
+
+        ConfigManager.OverridePath = previousOverride;
+        try { Directory.Delete(root, true); } catch { }
+    }
+
+    // ---------------- 注册链路：本地协议选择必须持久（现场反馈） ----------------
+
+    /// <summary>
+    /// 现场反馈："在链路配置里把 TCP 取消勾选、保存、重启 → TCP 又勾上了，删掉的链路也回来了"。
+    ///
+    /// 前两个症状来自**注册链路被中心/registry.json 覆盖**：
+    /// ① 本地单独取消一个协议过去只是"改了这一行"，没有记成本地意图 → 同步按中心宣告值改回来；
+    /// ② 已删除的注册链路会在下一次同步被重新生成（中心仍然在分发那个节点）。
+    /// 这里把①的行为钉死；②的出路是中心侧移除/清理长期离线（见下）。
+    /// </summary>
+    private static void TestRegistryLocalProtocolIntent()
+    {
+        Section("注册链路：本地取消勾选一个协议必须持久（不被同步改回）");
+
+        var root = Path.Combine(AppContext.BaseDirectory, ".testtmp", "intent_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var store = new RegistryStore(Path.Combine(root, "registry.json"), 60);
+
+        store.Upsert(new RegisterMessage
+        {
+            NodeId = "peer",
+            Name = "东莞机房",
+            Ip = "120.233.128.228",
+            Port = 16298,
+            Tcp = true,
+            Udp = true
+        }, true);
+
+        var snapshot = store.BuildSnapshot();
+
+        // 第一次同步：两条链路都按中心宣告（TCP + UDP）
+        var first = RegistrySync.Apply(snapshot, "self", new List<LinkConfig>());
+        var link = first.Links.First(l => l.NodeId == "peer");
+        Check("首次同步按中心宣告：TCP 开着", link.Tcp);
+        Check("首次同步按中心宣告：UDP 开着", link.Udp);
+        Check("首次同步没有本地意图", !link.LocalTcpOff && !link.LocalUdpOff && !link.LocalDisabled);
+
+        // 运维在界面上取消勾选 TCP（保留 UDP）→ 记成本地意图
+        link.Tcp = false;
+        link.LocalTcpOff = true;
+
+        var second = RegistrySync.Apply(snapshot, "self", first.Links);
+        var afterEdit = second.Links.First(l => l.NodeId == "peer");
+        Check("同步后 TCP 仍是本地关掉的（没有被改回勾选）", !afterEdit.Tcp, afterEdit.Tcp.ToString());
+        Check("UDP 照常按中心宣告", afterEdit.Udp);
+        Check("本地意图被保留", afterEdit.LocalTcpOff);
+        Check("只关一个协议不算整体停测", !afterEdit.LocalDisabled);
+
+        // 再同步十次也不会被改回
+        var links = second.Links;
+        for (var i = 0; i < 10; i++)
+        {
+            links = RegistrySync.Apply(snapshot, "self", links).Links;
+            links.First(l => l.NodeId == "peer").LocalTcpOff = true;
+        }
+
+        Check("反复同步十次 TCP 仍保持本地关闭", !links.First(l => l.NodeId == "peer").Tcp);
+
+        // 重新勾选 → 恢复按中心值
+        var restore = links.First(l => l.NodeId == "peer");
+        restore.Tcp = true;
+        restore.LocalTcpOff = false;
+
+        var third = RegistrySync.Apply(snapshot, "self", links);
+        Check("重新勾选后恢复中心宣告的 TCP", third.Links.First(l => l.NodeId == "peer").Tcp);
+
+        // 老配置迁移：只有 LocalDisabled=true 的链路 = 两个协议都本地关掉
+        var legacy = first.Links.Select(l => new LinkConfig
+        {
+            Name = l.Name,
+            Host = l.Host,
+            Port = l.Port,
+            Tcp = false,
+            Udp = false,
+            Source = LinkSources.Registry,
+            NodeId = l.NodeId,
+            LocalDisabled = true
+        }).ToList();
+
+        var migrated = RegistrySync.Apply(snapshot, "self", legacy);
+        var migratedLink = migrated.Links.First(l => l.NodeId == "peer");
+        Check("老配置（LocalDisabled）迁移后仍不发包", !migratedLink.Tcp && !migratedLink.Udp);
+        Check("迁移后本地意图写进两个协议", migratedLink.LocalTcpOff && migratedLink.LocalUdpOff);
+        Check("迁移后仍标记为整体停测", migratedLink.LocalDisabled);
+
+        // 中心表：长期离线的节点可被识别并清理（"删掉的链路又回来"的根源）
+        var fakeNow = DateTime.UtcNow.AddDays(-10);
+        var offline = new RegistryStore(Path.Combine(root, "offline.json"), 60, () => fakeNow);
+        offline.Upsert(new RegisterMessage
+        {
+            NodeId = "gone", Name = "已退役机器", Ip = "203.0.113.50", Port = 9000, Tcp = true, Udp = true
+        }, true);
+
+        fakeNow = DateTime.UtcNow;      // 时间前进 10 天
+        offline.RefreshOnlineState();
+
+        var now = DateTime.UtcNow;
+        var goneRow = RegistryNodeRow.FromNode(offline.Nodes.First(n => n.NodeId == "gone"), now, (_, _) => true);
+        Check("心跳停了 10 天的节点被标记为长期离线", goneRow.LongOffline, goneRow.LastSeen);
+        Check("中心也把它标成离线", !offline.Nodes.First(n => n.NodeId == "gone").Online);
+        Eq("节点 ID 短号显示前 8 位", "gone", goneRow.ShortId);
+        Check("长期离线节点仍在清单里（中心只标记不删除）", offline.Nodes.Any(n => n.NodeId == "gone"));
+
+        // 刚离线一会儿的不算长期：避免把临时断网当成退役
+        var fresh = new RegistryStore(Path.Combine(root, "fresh.json"), 60, () => DateTime.UtcNow.AddHours(-3));
+        fresh.Upsert(new RegisterMessage
+        {
+            NodeId = "sleepy", Name = "临时断网", Ip = "203.0.113.51", Port = 9000, Tcp = true, Udp = true
+        }, true);
+
+        var sleepyRow = RegistryNodeRow.FromNode(fresh.Nodes.First(), DateTime.UtcNow, (_, _) => true);
+        Check("只离线几小时的节点不算长期离线", !sleepyRow.LongOffline, sleepyRow.LastSeen);
+
+        Check("中心侧移除后不再分发（链路随之消失）", offline.RemoveNode("gone"));
+        Eq("移除后快照为空", 0, offline.BuildSnapshot().Count);
+        Check("被移除的节点进入移除名单（心跳也加不回来）", offline.IsRemoved("gone"));
+
+        try { Directory.Delete(root, true); } catch { }
+    }
+
     // ---------------- 一机房多 IP ----------------
 
     /// <summary>

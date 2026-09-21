@@ -312,9 +312,11 @@
 
             <StackPanel Grid.Column="2" Orientation="Horizontal">
                 <Button Content="保存配置" Click="SaveConfig_Click" Margin="0,0,8,0"
-                        ToolTip="把界面参数写回 appsettings.json"/>
+                        ToolTip="把界面参数与链路写回 appsettings.json（取消勾选、删除链路都会一起写入）"/>
+                <Button x:Name="ReloadConfigButton" Content="重新加载配置" Click="ReloadConfig_Click" Margin="0,0,8,0"
+                        ToolTip="从磁盘重新读取配置（丢弃界面上未保存的修改）。怀疑配置被别的程序或另一个实例改过时用它"/>
                 <Button Content="打开配置文件" Click="OpenConfig_Click"
-                        ToolTip="用系统默认程序打开 appsettings.json"/>
+                        ToolTip="用系统默认程序打开正在使用的那份 appsettings.json（启动时状态栏会显示完整路径）"/>
             </StackPanel>
         </Grid>
 
