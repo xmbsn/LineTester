@@ -7,7 +7,12 @@ namespace LineTester.Registry;
 /// <summary>
 /// 注册协议帧编解码与消息 DTO（规格 docs/REGISTRY-PROTOCOL.md §5）。
 ///
-/// 帧格式：<c>LT1|&lt;TYPE&gt;|&lt;rawPayload&gt;\n</c>（单行 ASCII，payload 为紧凑单行 JSON）。
+/// 帧格式：<c>LT1|&lt;TYPE&gt;|&lt;MAC&gt;|&lt;rawPayload&gt;\n</c>（单行 ASCII，payload 为紧凑单行 JSON）。
+///
+/// MAC 之所以放在**帧里而不是 payload 里**：它是对 <c>TYPE|payload</c> 计算的，
+/// 若把 mac 字段放进 payload，就变成"签名覆盖了签名自身"——接收方按原文重算必然不一致。
+/// 放在帧里，双方对同一段原文计算，无需任何 JSON 规范化。
+///
 /// 端口复用判定：报文以 <c>LT1|</c> 开头即为协议消息，否则走既有探测回显路径。
 /// 现有探测包以数字开头（<c>42|guid|v2</c>），老客户端以十六进制 GUID 开头，不会冲突。
 /// </summary>
@@ -53,18 +58,28 @@ public static class RegistryProtocol
         return true;
     }
 
-    public static byte[] Encode(string type, string rawPayload)
-        => Encoding.UTF8.GetBytes($"{Magic}{type}|{rawPayload}\n");
+    public static byte[] Encode(string type, string mac, string rawPayload)
+        => Encoding.UTF8.GetBytes($"{Magic}{type}|{mac}|{rawPayload}\n");
 
-    public static byte[] Encode<T>(string type, T message) => Encode(type, Serialize(message));
+    /// <summary>用密钥签名后编码（正规路径）。</summary>
+    public static byte[] EncodeSigned(string secret, string type, string rawPayload)
+        => Encode(type, RegistryAuth.ComputeMac(secret, type, rawPayload), rawPayload);
+
+    public static byte[] EncodeSigned<T>(string secret, string type, T message)
+        => EncodeSigned(secret, type, Serialize(message));
+
+    /// <summary>校验帧的签名（对收到的原文重算）。</summary>
+    public static bool VerifyFrame(string secret, string type, string mac, string rawPayload)
+        => RegistryAuth.VerifyMac(secret, type, rawPayload, mac);
 
     /// <summary>
     /// 解析帧。成功时 <paramref name="rawPayload"/> 是**原样文本**——
     /// HMAC 就是对这段原文计算的，因此绝不能重新序列化（字段顺序/转义会变）。
     /// </summary>
-    public static bool TryDecode(byte[] buffer, int length, out string type, out string rawPayload)
+    public static bool TryDecode(byte[] buffer, int length, out string type, out string mac, out string rawPayload)
     {
         type = "";
+        mac = "";
         rawPayload = "";
 
         if (!LooksLikeProtocolMessage(buffer, length)) return false;
@@ -72,12 +87,16 @@ public static class RegistryProtocol
         var text = Encoding.UTF8.GetString(buffer, 0, length).TrimEnd('\n', '\r');
 
         // Magic 本身以 '|' 结尾（"LT1|"），所以类型从 Magic.Length 开始，
-        // 到下一个 '|' 结束；其后全部是 payload（payload 内部可含 '|'）。
+        // 到下一个 '|' 结束；再下一个 '|' 之后全部是 payload（payload 内部可含 '|'）。
         var typeEnd = text.IndexOf('|', Magic.Length);
         if (typeEnd < 0) return false;
 
+        var macEnd = text.IndexOf('|', typeEnd + 1);
+        if (macEnd < 0) return false;
+
         type = text[Magic.Length..typeEnd];
-        rawPayload = text[(typeEnd + 1)..];
+        mac = text[(typeEnd + 1)..macEnd];
+        rawPayload = text[(macEnd + 1)..];
         return type.Length > 0;
     }
 
@@ -105,6 +124,10 @@ public static class RegistryErrorCodes
     public const string Unspecified = "unspecified";
     public const string LinkLocal = "linklocal";
     public const string Throttled = "throttled";
+
+    /// <summary>该 nodeId 已被中心移除（不会被心跳加回来，需中心侧恢复）。</summary>
+    public const string Removed = "removed";
+
     public const string Unsupported = "unsupported";
     public const string Internal = "internal";
 }
@@ -178,6 +201,10 @@ public sealed class AckMessage
 public sealed class PartMessage
 {
     public string XferId { get; set; } = "";
+
+    /// <summary>关联的请求号：让客户端知道这批分块拼出来的是哪个请求的应答。</summary>
+    public string ReqId { get; set; } = "";
+
     public int I { get; set; }
     public int N { get; set; }
     public string Data { get; set; } = "";

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using LineTester.Registry;
 
 namespace LineTester;
 
@@ -20,6 +21,15 @@ public sealed class ProbeServer : IDisposable
     public ProbeServer(int port) => _port = port;
 
     public bool DualStack { get; private set; }
+
+    /// <summary>
+    /// 注册协议消息处理器（规格 docs/REGISTRY-PROTOCOL.md §5.1）。
+    ///
+    /// 仅在报文以 <c>LT1|</c> 开头且已设置处理器时调用，因此**既有探测回显路径一行都不受影响**。
+    /// 返回待回发的帧；空列表表示"已处理但无需回包"。未设置处理器时按老版本行为**原样回显**，
+    /// 让发起方据此判定"对端不支持协议"（规格 §12 兼容矩阵的一行）。
+    /// </summary>
+    public Func<byte[], int, IPEndPoint?, CancellationToken, Task<IReadOnlyList<byte[]>>>? ProtocolHandler { get; set; }
 
     public void Start()
     {
@@ -109,7 +119,7 @@ public sealed class ProbeServer : IDisposable
         }
     }
 
-    private static async Task HandleTcp(TcpClient client, CancellationToken ct)
+    private async Task HandleTcp(TcpClient client, CancellationToken ct)
     {
         using (client)
         {
@@ -117,15 +127,48 @@ public sealed class ProbeServer : IDisposable
             var buffer = new byte[4096];
             try
             {
-                var n = await stream.ReadAsync(buffer, ct).ConfigureAwait(false);
-                if (n > 0)
+                var n = await ReadFrameAsync(stream, buffer, ct).ConfigureAwait(false);
+                if (n <= 0) return;
+
+                var remote = client.Client.RemoteEndPoint as IPEndPoint;
+
+                if (RegistryProtocol.LooksLikeProtocolMessage(buffer, n) && ProtocolHandler is { } protocol)
                 {
-                    var reply = BuildReply(buffer, n, client.Client.RemoteEndPoint as IPEndPoint);
-                    await stream.WriteAsync(reply, ct).ConfigureAwait(false);
+                    var replies = await protocol(buffer, n, remote, ct).ConfigureAwait(false);
+                    foreach (var reply in replies)
+                    {
+                        await stream.WriteAsync(reply, ct).ConfigureAwait(false);
+                    }
+
+                    return;
                 }
+
+                await stream.WriteAsync(BuildReply(buffer, n, remote), ct).ConfigureAwait(false);
             }
             catch { }
         }
+    }
+
+    /// <summary>
+    /// 读一帧。探测包读一次即可（与既有行为一致）；协议帧以 <c>\n</c> 结束，需要读到结束符。
+    /// </summary>
+    private static async Task<int> ReadFrameAsync(NetworkStream stream, byte[] buffer, CancellationToken ct)
+    {
+        var read = 0;
+
+        while (read < buffer.Length)
+        {
+            var n = await stream.ReadAsync(buffer.AsMemory(read), ct).ConfigureAwait(false);
+            if (n == 0) break;
+
+            read += n;
+
+            // 不是协议帧（探测包）→ 读一次就走，保持既有语义不变
+            if (!RegistryProtocol.LooksLikeProtocolMessage(buffer, read)) break;
+            if (buffer[read - 1] == RegistryProtocol.FrameTerminator) break;
+        }
+
+        return read;
     }
 
     private async Task UdpLoop(CancellationToken ct)
@@ -135,6 +178,21 @@ public sealed class ProbeServer : IDisposable
             try
             {
                 var result = await _udp!.ReceiveAsync(ct).ConfigureAwait(false);
+
+                if (RegistryProtocol.LooksLikeProtocolMessage(result.Buffer, result.Buffer.Length) &&
+                    ProtocolHandler is { } protocol)
+                {
+                    var replies = await protocol(result.Buffer, result.Buffer.Length, result.RemoteEndPoint, ct)
+                        .ConfigureAwait(false);
+
+                    foreach (var frame in replies)
+                    {
+                        await _udp.SendAsync(frame.AsMemory(), result.RemoteEndPoint, ct).ConfigureAwait(false);
+                    }
+
+                    continue;
+                }
+
                 var reply = BuildReply(result.Buffer, result.Buffer.Length, result.RemoteEndPoint);
                 await _udp.SendAsync(reply.AsMemory(), result.RemoteEndPoint, ct).ConfigureAwait(false);
             }

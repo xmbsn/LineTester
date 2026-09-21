@@ -49,6 +49,8 @@ internal static partial class Program
         TestRegistryAddressRules();
         TestRegistryStore();
         TestRegistrySync();
+        TestRegistryCenter();
+        await TestRegistryEndToEndAsync();
         await TestProbesAsync();
         TestMainWindowClear();
 

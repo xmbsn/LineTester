@@ -119,6 +119,9 @@ public sealed class RegistrarConfig
     public const int MinRetryMs = 200;
     public const int MaxRetryMs = 10000;
     public const int MaxRetriesLimit = 10;
+
+    /// <summary>生成新的节点身份（首次启动或配置丢失时使用）。</summary>
+    public static string NewNodeId() => Guid.NewGuid().ToString("N");
 }
 
 public sealed class LinkConfig

@@ -1,4 +1,5 @@
 using System.IO;
+using System.Net;
 using System.Text;
 using LineTester.Registry;
 
@@ -16,12 +17,22 @@ internal static partial class Program
     {
         Section("注册协议：帧编解码");
 
-        var frame = RegistryProtocol.Encode(RegistryProtocol.TypeRegister, "{\"a\":1}");
-        Eq("帧格式为 LT1|TYPE|payload\\n", "LT1|REG|{\"a\":1}\n", Encoding.UTF8.GetString(frame));
+        var frame = RegistryProtocol.Encode(RegistryProtocol.TypeRegister, "abc123", "{\"a\":1}");
+        Eq("帧格式为 LT1|TYPE|MAC|payload\\n", "LT1|REG|abc123|{\"a\":1}\n", Encoding.UTF8.GetString(frame));
         Check("协议帧被识别", RegistryProtocol.LooksLikeProtocolMessage(frame, frame.Length));
-        Check("帧可解析", RegistryProtocol.TryDecode(frame, frame.Length, out var type, out var payload));
+        Check("帧可解析", RegistryProtocol.TryDecode(frame, frame.Length, out var type, out var mac, out var payload));
         Eq("类型解析正确", "REG", type);
+        Eq("mac 是独立一段（不能放进 payload，否则签名覆盖自身、永远校验不过）", "abc123", mac);
         Eq("payload 原样保留（HMAC 依赖原文，不能重新序列化）", "{\"a\":1}", payload);
+
+        const string secret = "preshared";
+        var signed = RegistryProtocol.EncodeSigned(secret, RegistryProtocol.TypeSync, "{\"n\":1}");
+        Check("签名帧可解析",
+            RegistryProtocol.TryDecode(signed, signed.Length, out var signedType, out var signedMac, out var signedPayload));
+        Check("签名帧验签通过", RegistryProtocol.VerifyFrame(secret, signedType, signedMac, signedPayload));
+        Check("换密钥后验签失败", !RegistryProtocol.VerifyFrame("other", signedType, signedMac, signedPayload));
+        Check("改 payload 后验签失败", !RegistryProtocol.VerifyFrame(secret, signedType, signedMac, signedPayload + "x"));
+        Check("改类型后验签失败", !RegistryProtocol.VerifyFrame(secret, "ACK", signedMac, signedPayload));
 
         var probe = Encoding.UTF8.GetBytes("42|3f2a9c1d4b5e6f708192a3b4c5d6e7f8|v2");
         Check("探测包（数字开头）不被误判为协议消息",
@@ -30,16 +41,18 @@ internal static partial class Program
         Check("老版本探测包（GUID 开头）不被误判为协议消息",
             !RegistryProtocol.LooksLikeProtocolMessage(legacyProbe, legacyProbe.Length));
 
-        Check("缺类型分隔符的帧被拒绝",
-            !RegistryProtocol.TryDecode(Encoding.UTF8.GetBytes("LT1|REG\n"), 8, out _, out _));
+        Check("缺 mac 分隔符的帧被拒绝",
+            !RegistryProtocol.TryDecode(Encoding.UTF8.GetBytes("LT1|REG\n"), 8, out _, out _, out _));
+        Check("缺 payload 分隔符的帧被拒绝",
+            !RegistryProtocol.TryDecode(Encoding.UTF8.GetBytes("LT1|REG|mac\n"), 12, out _, out _, out _));
         Check("空类型的帧被拒绝",
-            !RegistryProtocol.TryDecode(Encoding.UTF8.GetBytes("LT1||{}\n"), 8, out _, out _));
-        Check("空输入被拒绝", !RegistryProtocol.TryDecode(Array.Empty<byte>(), 0, out _, out _));
+            !RegistryProtocol.TryDecode(Encoding.UTF8.GetBytes("LT1||m|{}\n"), 10, out _, out _, out _));
+        Check("空输入被拒绝", !RegistryProtocol.TryDecode(Array.Empty<byte>(), 0, out _, out _, out _));
 
         var tricky = "{\"name\":\"a|b\\nc\",\"n\":1}";
-        var trickyFrame = RegistryProtocol.Encode(RegistryProtocol.TypeRegister, tricky);
+        var trickyFrame = RegistryProtocol.Encode(RegistryProtocol.TypeRegister, "m", tricky);
         Check("payload 含 | 与转义换行时往返正确",
-            RegistryProtocol.TryDecode(trickyFrame, trickyFrame.Length, out var trickyType, out var trickyPayload)
+            RegistryProtocol.TryDecode(trickyFrame, trickyFrame.Length, out var trickyType, out _, out var trickyPayload)
             && trickyType == "REG" && trickyPayload == tricky,
             trickyPayload);
 
@@ -324,8 +337,22 @@ internal static partial class Program
             Check("删除节点成功", reopened.RemoveNode("n1"));
             Eq("删除使 rev+1", revBeforeRemove + 1, reopened.Revision);
             Eq("删除后清单为空", 0, reopened.Nodes.Count);
-            Check("删除不存在的节点返回 false", !reopened.RemoveNode("nope"));
+            Check("被删除的节点进入移除名单（心跳不会把它加回来）", reopened.IsRemoved("n1"));
+            Check("未知 nodeId 也会被记入名单（可预先封禁）", reopened.RemoveNode("nope"));
+            Check("重复移除同一 nodeId 返回 false", !reopened.RemoveNode("nope"));
             Eq("删除后快照为空", 0, reopened.BuildSnapshot().Count);
+
+            // 被移除的节点再次注册必须被拒绝（否则"中心删除"会被下一拍心跳撤销）
+            var blocked = reopened.Upsert(Msg("n1", "机房A-改名", "203.0.113.10", 50002, "i1"), true);
+            Check("已被移除的节点注册被拒绝", !blocked.Accepted);
+            Eq("拒绝错误码为 removed", RegistryErrorCodes.Removed, blocked.ErrorCode);
+            Eq("拒绝后清单仍为空", 0, reopened.Nodes.Count);
+
+            // 显式恢复后才允许重新注册
+            Check("恢复后从名单移除", reopened.RestoreNode("n1") && !reopened.IsRemoved("n1"));
+            Check("恢复不存在的 nodeId 返回 false", !reopened.RestoreNode("never-removed"));
+            Check("恢复后可以重新注册", reopened.Upsert(Msg("n1", "机房A-改名", "203.0.113.10", 50002, "i1"), true).Accepted);
+            Eq("恢复后清单恢复", 1, reopened.Nodes.Count);
 
             // 同一 nodeId 被两台机器同时使用（配置被复制）的疑似识别
             var dup = new RegistryStore(Path.Combine(dir, "dup.json"), 60, () => clock);
@@ -419,5 +446,339 @@ internal static partial class Program
         Eq("回环地址节点不生成链路", 0, loopOnly.Added);
         Eq("仍只有手工链路", 1, loopOnly.Links.Count);
         Check("无可分发目标时不算有变化", !loopOnly.HasChanges);
+    }
+
+    // ---------------- 中心服务（认证/幂等/限流/分块） ----------------
+
+    private static void TestRegistryCenter()
+    {
+        Section("注册协议：中心服务（认证/幂等/限流/分块）");
+
+        var dir = Path.Combine(AppContext.BaseDirectory, ".testtmp", "ctr_" + Guid.NewGuid().ToString("N"));
+        const string secret = "preshared";
+        var clock = new DateTime(2026, 9, 20, 12, 0, 0, DateTimeKind.Utc);
+
+        try
+        {
+            var store = new RegistryStore(Path.Combine(dir, "registry.json"), 60, () => clock);
+            var center = new RegistryCenterService(store, secret, 60, () => clock);
+            var remote = new IPEndPoint(IPAddress.Parse("198.51.100.7"), 41234);
+
+            byte[] Frame(string nodeId, string ip, int port, ulong rev, string reqId, string nonce,
+                string frameSecret = secret, long? ts = null, bool tcp = true, bool udp = true)
+            {
+                var payload = RegistryProtocol.Serialize(new RegisterMessage
+                {
+                    ReqId = reqId,
+                    NodeId = nodeId,
+                    Name = "节点" + nodeId,
+                    Ip = ip,
+                    Port = port,
+                    Tcp = tcp,
+                    Udp = udp,
+                    Distributable = true,
+                    Instance = "i-" + nodeId,
+                    Rev = rev,
+                    Ts = ts ?? RegistryAuth.ToUnixSeconds(clock),
+                    Nonce = nonce
+                });
+
+                return RegistryProtocol.EncodeSigned(frameSecret, RegistryProtocol.TypeRegister, payload);
+            }
+
+            IReadOnlyList<byte[]> Send(byte[] frame)
+                => center.HandleAsync(frame, frame.Length, remote, CancellationToken.None).GetAwaiter().GetResult();
+
+            (AckMessage? Ack, ErrorMessage? Error) Parse(IReadOnlyList<byte[]> frames)
+            {
+                AckMessage? ack = null;
+                ErrorMessage? error = null;
+
+                foreach (var frame in frames)
+                {
+                    if (!RegistryProtocol.TryDecode(frame, frame.Length, out var type, out _, out var payload)) continue;
+                    if (type == RegistryProtocol.TypeAck) ack = RegistryProtocol.Deserialize<AckMessage>(payload);
+                    else if (type == RegistryProtocol.TypeError) error = RegistryProtocol.Deserialize<ErrorMessage>(payload);
+                }
+
+                return (ack, error);
+            }
+
+            var first = Parse(Send(Frame("a", "203.0.113.11", 50001, 0, "r1", "n1")));
+            Check("首次注册返回 ACK", first.Ack is not null, first.Error?.Code);
+            Check("首次注册判定有变化", first.Ack!.Changed);
+            Eq("ACK 带回中心 revision", 1UL, first.Ack.Rev);
+            Eq("ACK 带完整快照", 1, first.Ack.Nodes!.Count);
+            Check("ACK 回显中心看到的源地址（供与手填地址交叉核对）",
+                first.Ack.SelfCheck is { SeenIp: "198.51.100.7", SeenPort: 41234 });
+
+            var repeat = Parse(Send(Frame("a", "203.0.113.11", 50001, 0, "r1", "n1")));
+            Eq("重传同一 reqId 不重复递增 revision", 1UL, store.Revision);
+            Check("重传返回缓存应答（幂等）", repeat.Ack is not null && repeat.Ack.Rev == 1);
+
+            var badMac = Parse(Send(Frame("a", "203.0.113.11", 50001, 1, "r2", "n2", frameSecret: "wrong-secret")));
+            Check("签名不匹配时返回 ERR", badMac.Error is not null);
+            Eq("错误码为 auth", RegistryErrorCodes.Auth, badMac.Error!.Code);
+            Check("签名不匹配时不返回 ACK", badMac.Ack is null);
+
+            var stale = Parse(Send(Frame("a", "203.0.113.11", 50001, 1, "r3", "n3",
+                ts: RegistryAuth.ToUnixSeconds(clock) - 400)));
+            Eq("时间戳偏差过大 → auth", RegistryErrorCodes.Auth, stale.Error!.Code);
+
+            var replay = Parse(Send(Frame("a", "203.0.113.11", 50001, 1, "r4", "n1")));
+            Eq("重复 nonce → auth", RegistryErrorCodes.Auth, replay.Error!.Code);
+
+            var loopback = Parse(Send(Frame("b", "127.0.0.1", 50001, 0, "r5", "n5")));
+            Eq("回环地址 → loopback", RegistryErrorCodes.Loopback, loopback.Error!.Code);
+            Eq("回环地址不进清单", 1, store.Nodes.Count);
+
+            var unchanged = Parse(Send(Frame("a", "203.0.113.11", 50001, 1, "r6", "n6")));
+            Check("rev 一致时 changed=false（稳态只回 1 个包）", unchanged.Ack is { Changed: false });
+            Check("短路应答不带快照", unchanged.Ack!.Nodes is null);
+
+            ErrorMessage? throttled = null;
+            for (var i = 0; i < 30; i++)
+            {
+                var rate = Parse(Send(Frame("a", "203.0.113.11", 50001, 1, $"rate{i}", $"rn{i}")));
+                if (rate.Error?.Code != RegistryErrorCodes.Throttled) continue;
+
+                throttled = rate.Error;
+                break;
+            }
+
+            Check("超过请求限流阈值 → throttled", throttled is not null, throttled?.Code);
+            Check("限流应答带 retryAfter", throttled is { RetryAfter: > 0 });
+
+            // ---- 分块：塞满节点让快照超过单包上限 ----
+            clock = clock.AddSeconds(60);
+            for (var i = 0; i < 14; i++)
+            {
+                Send(Frame($"bulk{i}", $"203.0.113.{100 + i}", 51000 + i, 0, $"rb{i}", $"nb{i}"));
+            }
+
+            Eq("批量注册后清单变大", 15, store.Nodes.Count);
+
+            clock = clock.AddSeconds(60);
+            var chunked = Send(Frame("a", "203.0.113.11", 50001, 1, "rc1", "nc1"));
+
+            var parts = new List<PartMessage>();
+            foreach (var frame in chunked)
+            {
+                if (!RegistryProtocol.TryDecode(frame, frame.Length, out var type, out _, out var payload)) continue;
+                if (type == RegistryProtocol.TypePart) parts.Add(RegistryProtocol.Deserialize<PartMessage>(payload)!);
+            }
+
+            Check("大快照走分块传输", parts.Count > 1, $"块数={parts.Count}");
+            Check("每个分块都带 reqId（客户端据此关联本次请求）",
+                parts.All(p => p.ReqId == "rc1"), parts.FirstOrDefault()?.ReqId);
+            Eq("分块序号从 0 连续", string.Join(",", parts.Select(p => p.I).OrderBy(i => i)),
+                string.Join(",", Enumerable.Range(0, parts.Count)));
+            Eq("分块声明总数一致", parts.Count, parts[0].N);
+            Check("分块内容可拼回合法 JSON",
+                RegistryChunking.TryJoin(parts.OrderBy(p => p.I).Select(p => (string?)p.Data).ToList(), out var assembled)
+                && RegistryProtocol.Deserialize<AckMessage>(assembled) is not null);
+
+            // 只声明收到第 0 块 → 应只补发其余块
+            var transferId = parts[0].XferId;
+            var partialBitmap = RegistryChunking.SetBit(RegistryChunking.EmptyBitmap(parts.Count), 0);
+            var partialPayload = RegistryProtocol.Serialize(new PartAckMessage { XferId = transferId, Bitmap = partialBitmap });
+            var partialFrame = RegistryProtocol.EncodeSigned(secret, RegistryProtocol.TypePartAck, partialPayload);
+            var resend = center.HandleAsync(partialFrame, partialFrame.Length, remote, CancellationToken.None)
+                .GetAwaiter().GetResult();
+
+            var resent = new List<int>();
+            foreach (var frame in resend)
+            {
+                if (!RegistryProtocol.TryDecode(frame, frame.Length, out var type, out _, out var payload)) continue;
+                if (type == RegistryProtocol.TypePart) resent.Add(RegistryProtocol.Deserialize<PartMessage>(payload)!.I);
+            }
+
+            Eq("只补发缺失块", parts.Count - 1, resent.Count);
+            Check("不含已确认的第 0 块", !resent.Contains(0), string.Join(",", resent));
+
+            // 未验签的位图必须被忽略（否则可被用来让中心把清单发到任意地址）
+            var forgedFrame = RegistryProtocol.EncodeSigned("wrong-secret", RegistryProtocol.TypePartAck, partialPayload);
+            var forged = center.HandleAsync(forgedFrame, forgedFrame.Length, remote, CancellationToken.None)
+                .GetAwaiter().GetResult();
+            Eq("未验签的位图被忽略", 0, forged.Count);
+
+            // 全部确认 → 不再补发
+            var fullBitmap = RegistryChunking.EmptyBitmap(parts.Count);
+            for (var i = 0; i < parts.Count; i++) fullBitmap = RegistryChunking.SetBit(fullBitmap, i);
+            var fullPayload = RegistryProtocol.Serialize(new PartAckMessage { XferId = transferId, Bitmap = fullBitmap });
+            var fullFrame = RegistryProtocol.EncodeSigned(secret, RegistryProtocol.TypePartAck, fullPayload);
+            var completed = center.HandleAsync(fullFrame, fullFrame.Length, remote, CancellationToken.None)
+                .GetAwaiter().GetResult();
+            Eq("全部确认后不再补发", 0, completed.Count);
+        }
+        finally
+        {
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+
+    // ---------------- 三节点端到端 ----------------
+
+    private static async Task TestRegistryEndToEndAsync()
+    {
+        Section("注册协议：三节点端到端（自动生成链路 / 删除传播 / 兼容）");
+
+        var root = Path.Combine(AppContext.BaseDirectory, ".testtmp", "e2e_" + Guid.NewGuid().ToString("N"));
+        var logDir = Path.Combine(root, "logs");
+        const string secret = "e2e-secret";
+
+        var centerPort = FindBindablePort();
+        var legacyPort = FindBindablePort();
+
+        var store = new RegistryStore(Path.Combine(root, "registry.json"), 60);
+        var centerService = new RegistryCenterService(store, secret, 60);
+
+        using var centerServer = new ProbeServer(centerPort);
+        var handled = 0;
+        Exception? handlerError = null;
+        centerServer.ProtocolHandler = (request, length, remote, ct) =>
+        {
+            Interlocked.Increment(ref handled);
+            try
+            {
+                return centerService.HandleAsync(request, length, remote, ct);
+            }
+            catch (Exception ex)
+            {
+                // 被动端的 catch 会吞掉处理器异常（不影响探测），这里显式留证
+                handlerError ??= ex;
+                throw;
+            }
+        };
+        centerServer.Start();
+
+        // 未启用注册协议的节点（等价旧版本）：没有 protocol handler → 协议消息被原样回显
+        using var legacyServer = new ProbeServer(legacyPort);
+        legacyServer.Start();
+
+        using var nodeA = new RegistryTestNode("a", "203.0.113.11", 50001, centerPort, secret, logDir);
+        using var nodeB = new RegistryTestNode("b", "203.0.113.12", 50002, centerPort, secret, logDir);
+
+        try
+        {
+            Check("A 注册成功", await nodeA.Client.RegisterNowAsync(), nodeA.Client.Status.LastError);
+            Check("中心处理器没有抛异常", handlerError is null, handlerError?.ToString());
+            Check("协议消息被端口分流到中心服务", handled > 0, $"handled={handled}");
+            Check("B 注册成功", await nodeB.Client.RegisterNowAsync(), nodeB.Client.Status.LastError);
+            Eq("中心清单里有 2 个节点", 2, store.Nodes.Count);
+
+            Check("A 再次注册以拿到含 B 的最新快照", await nodeA.Client.RegisterNowAsync());
+
+            var links = nodeA.Snapshot();
+            Eq("A 自动生成 1 条链路（对端 B）", 1, links.Count);
+            Eq("链路地址来自 B 的注册值", "203.0.113.12", links[0].Host);
+            Eq("链路端口来自 B 的注册值", 50002, links[0].Port);
+            Eq("链路来源标记为注册中心", LinkSources.Registry, links[0].Source);
+            Eq("链路记录了来源节点 id", "b", links[0].NodeId);
+            Check("A 不会把自己加成链路", links.All(l => l.NodeId != "a"));
+            Check("A 记录了中心 revision", nodeA.Client.Status.Revision > 0, nodeA.Client.Status.Revision.ToString());
+            Check("记录了中心看到的本端源地址（与手填地址交叉核对）",
+                nodeA.Client.Status.SeenFrom?.StartsWith("127.0.0.1:") == true, nodeA.Client.Status.SeenFrom);
+
+            // ---- 删除传播：中心移除 B，且**心跳不会把它加回来** ----
+            Check("中心移除节点 B", store.RemoveNode("b"));
+            Check("B 的再次注册被拒绝", !await nodeB.Client.RegisterNowAsync());
+            Check("B 收到 removed 错误",
+                nodeB.Client.Status.LastError?.Contains(RegistryErrorCodes.Removed) == true,
+                nodeB.Client.Status.LastError);
+            Eq("中心清单仍为 1 个节点（心跳没能复活它）", 1, store.Nodes.Count);
+
+            Check("A 同步成功", await nodeA.Client.RegisterNowAsync());
+            Eq("删除传播到 A：B 的链路消失", 0, nodeA.Snapshot().Count);
+
+            // ---- 恢复后重新出现 ----
+            Check("中心恢复节点 B", store.RestoreNode("b"));
+            Check("B 恢复后注册成功", await nodeB.Client.RegisterNowAsync(), nodeB.Client.Status.LastError);
+            Check("A 同步成功", await nodeA.Client.RegisterNowAsync());
+            Eq("恢复后 A 重新生成 B 的链路", 1, nodeA.Snapshot().Count);
+
+            // ---- 兼容：对端不是注册中心（旧版本纯回显） ----
+            using var legacyNode = new RegistryTestNode("legacy", "203.0.113.99", 50009, legacyPort, secret, logDir);
+            Check("打到非注册中心地址时注册失败", !await legacyNode.Client.RegisterNowAsync());
+            Check("明确报出“不是注册中心”而不是只报超时",
+                legacyNode.Client.Status.LastError?.Contains("不是注册中心") == true,
+                legacyNode.Client.Status.LastError);
+
+            // ---- 兼容：装了协议处理器也不影响探测回显 ----
+            var probeClient = new ProbeClient();
+            var probeLink = new LinkConfig { Name = "端点探测", Host = "127.0.0.1", Port = centerPort };
+            var tcpProbe = await probeClient.ProbeAsync(probeLink, "TCP", 1000, CancellationToken.None);
+            var udpProbe = await probeClient.ProbeAsync(probeLink, "UDP", 1000, CancellationToken.None);
+            Check("装了协议处理器后 TCP 探测仍成功", tcpProbe is { Lost: false }, tcpProbe?.Info);
+            Check("装了协议处理器后 UDP 探测仍成功", udpProbe is { Lost: false }, udpProbe?.Info);
+            Check("探测结果仍带对端看到的源地址",
+                tcpProbe?.SeenFrom.StartsWith("127.0.0.1:") == true, tcpProbe?.SeenFrom);
+
+            // ---- 协议日志 ----
+            var logFiles = Directory.Exists(logDir)
+                ? Directory.GetFiles(logDir, "registry.log", SearchOption.AllDirectories)
+                : Array.Empty<string>();
+            Check("写入按天目录下的 registry.log", logFiles.Length > 0, logDir);
+
+            if (logFiles.Length > 0)
+            {
+                var content = File.ReadAllText(logFiles[0]);
+                Check("协议日志不含密钥", !content.Contains(secret), content.Split('\n').FirstOrDefault());
+                Check("协议日志记录了快照事件", content.Contains("清单快照"), content.Split('\n').FirstOrDefault());
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch { }
+        }
+    }
+
+    /// <summary>端到端用的测试节点：一个客户端 + 一份本地链路清单（订阅快照并套用）。</summary>
+    private sealed class RegistryTestNode : IDisposable
+    {
+        private readonly object _gate = new();
+        private List<LinkConfig> _links = new();
+
+        public RegistryTestNode(string nodeId, string publicHost, int publicPort, int centerPort,
+            string secret, string logDirectory)
+        {
+            Client = new RegistryClient(new RegistryClientOptions
+            {
+                NodeId = nodeId,
+                NodeName = "节点" + nodeId,
+                PublicHost = publicHost,
+                PublicPort = publicPort,
+                CenterHost = "127.0.0.1",
+                CenterPort = centerPort,
+                Secret = secret,
+                HeartbeatSeconds = 15,
+                SyncSeconds = 15,
+                RetryMs = 200,
+                MaxRetries = 2,
+                LogDirectory = logDirectory
+            });
+
+            Client.SnapshotReceived += nodes =>
+            {
+                lock (_gate)
+                {
+                    _links = RegistrySync.Apply(nodes, nodeId, _links).Links;
+                }
+            };
+
+            Client.Start();
+        }
+
+        public RegistryClient Client { get; }
+
+        public List<LinkConfig> Snapshot()
+        {
+            lock (_gate)
+            {
+                return new List<LinkConfig>(_links);
+            }
+        }
+
+        public void Dispose() => Client.Dispose();
     }
 }

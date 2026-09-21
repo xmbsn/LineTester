@@ -45,6 +45,14 @@ public sealed class RegistryState
 {
     public ulong Revision { get; set; }
     public List<RegistryNode> Nodes { get; set; } = new();
+
+    /// <summary>
+    /// 已在中心被移除的 nodeId（持久化）。
+    /// 必须有这个名单：被删除的节点**还在运行、还会继续心跳**，否则下一次心跳就把它加回来了，
+    /// "在中心删除"就变成了一次性动作而不是权威决定。
+    /// 需要恢复时由中心显式恢复（见 <see cref="RegistryStore.RestoreNode"/>）。
+    /// </summary>
+    public List<string> RemovedNodeIds { get; set; } = new();
 }
 
 public sealed record RegistryUpsertResult(bool Accepted, string ErrorCode, string ErrorMessage, bool Changed)
@@ -93,6 +101,9 @@ public sealed class RegistryStore
 
     public IReadOnlyList<RegistryNode> Nodes => _state.Nodes;
 
+    /// <summary>已被中心移除、且在其重新注册时会被拒绝的 nodeId 列表。</summary>
+    public IReadOnlyList<string> RemovedNodeIds => _state.RemovedNodeIds;
+
     public TimeSpan OfflineTtl => TimeSpan.FromSeconds(_heartbeatSeconds * OfflineTtlHeartbeats);
 
     /// <summary>载入时若文件损坏，从空清单开始（节点会在一个心跳内重新注册），不阻塞中心启动。</summary>
@@ -111,6 +122,7 @@ public sealed class RegistryStore
 
             _state = loaded ?? new RegistryState();
             _state.Nodes ??= new List<RegistryNode>();
+            _state.RemovedNodeIds ??= new List<string>();
 
             // online 由 lastSeen 推导，不接受持久化的陈旧值
             var now = _clock();
@@ -124,9 +136,15 @@ public sealed class RegistryStore
 
     public bool IsRecent(DateTime lastSeenUtc, DateTime nowUtc) => nowUtc - lastSeenUtc <= OfflineTtl;
 
-    /// <summary>注册/心跳（幂等 upsert）。地址不合规时拒绝并带回错误码。</summary>
+    /// <summary>注册/心跳（幂等 upsert）。地址不合规或被中心移除时拒绝并带回错误码。</summary>
     public RegistryUpsertResult Upsert(RegisterMessage message, bool authenticated)
     {
+        if (_state.RemovedNodeIds.Contains(message.NodeId, StringComparer.Ordinal))
+        {
+            return RegistryUpsertResult.Rejected(RegistryErrorCodes.Removed,
+                "本节点已被注册中心移除，如需恢复请在注册中心侧恢复");
+        }
+
         if (!RegistryAddressRules.IsDistributable(message.Ip, out var errorCode, out var errorMessage))
             return RegistryUpsertResult.Rejected(errorCode, errorMessage);
 
@@ -186,16 +204,41 @@ public sealed class RegistryStore
         return RegistryUpsertResult.Ok(changed);
     }
 
+    /// <summary>
+    /// 移除节点（中心侧的权威删除）：从清单移除，并记入移除名单——
+    /// 该节点**继续心跳也不会被加回来**，直到中心显式恢复。
+    /// </summary>
     public bool RemoveNode(string nodeId)
     {
         var node = _state.Nodes.FirstOrDefault(n => string.Equals(n.NodeId, nodeId, StringComparison.Ordinal));
-        if (node is null) return false;
 
-        _state.Nodes.Remove(node);
+        var added = false;
+        if (!_state.RemovedNodeIds.Contains(nodeId, StringComparer.Ordinal))
+        {
+            _state.RemovedNodeIds.Add(nodeId);
+            added = true;
+        }
+
+        if (node is null && !added) return false;
+
+        if (node is not null) _state.Nodes.Remove(node);
+
         _state.Revision++;
         Save();
         return true;
     }
+
+    /// <summary>恢复被移除的节点（它会随下一次心跳重新出现）。</summary>
+    public bool RestoreNode(string nodeId)
+    {
+        if (!_state.RemovedNodeIds.Remove(nodeId)) return false;
+
+        _state.Revision++;
+        Save();
+        return true;
+    }
+
+    public bool IsRemoved(string nodeId) => _state.RemovedNodeIds.Contains(nodeId, StringComparer.Ordinal);
 
     public bool SetCenterHidden(string nodeId, bool hidden)
     {
