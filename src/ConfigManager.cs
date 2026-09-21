@@ -3,7 +3,6 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Threading;
 
 namespace LineTester;
 
@@ -105,48 +104,9 @@ public static class ConfigManager
     /// <summary>原子写入：先写临时文件再替换，避免写一半崩溃导致配置损坏。</summary>
     public static void Save(AppConfig config)
     {
-        var path = ConfigPath;
-        var dir = Path.GetDirectoryName(path);
-        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-
         var json = JsonSerializer.Serialize(config, Options);
-        var tmp = path + ".tmp";
-
-        try
-        {
-            WriteWithRetry(tmp, path, json);
-        }
-        catch
-        {
-            try { if (File.Exists(tmp)) File.Delete(tmp); } catch { }
-            throw;
-        }
+        AtomicFile.WriteAllText(ConfigPath, json);
     }
-
-    /// <summary>替换重试次数：退避间隔为 40/80/120/160/200ms，最坏约 600ms。</summary>
-    private const int MaxWriteAttempts = 6;
-
-    private static void WriteWithRetry(string tmp, string path, string json)
-    {
-        for (var attempt = 1; ; attempt++)
-        {
-            try
-            {
-                File.WriteAllText(tmp, json, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-                File.Move(tmp, path, overwrite: true);
-                return;
-            }
-            catch (Exception ex) when (attempt < MaxWriteAttempts && IsTransientWriteFailure(ex))
-            {
-                // Windows 上目标文件可能被索引器/杀毒软件/记事本等瞬时占用，
-                // 表现为共享冲突或“拒绝访问”。退避重试，避免用户看到莫名其妙的“保存失败”。
-                Thread.Sleep(40 * attempt);
-            }
-        }
-    }
-
-    private static bool IsTransientWriteFailure(Exception ex)
-        => ex is IOException or UnauthorizedAccessException;
 
     /// <summary>
     /// 单条链路的校验规则。链路编辑器与配置文件校验共用这一份规则，
@@ -185,12 +145,18 @@ public static class ConfigManager
             problems.Add("LossWarnPercent 不能为负数");
         if (config.ConsecutiveLossWarn < 1)
             problems.Add("ConsecutiveLossWarn 不能小于 1");
+
+        ValidateRegistrar(config.Registrar, problems);
+
         if (config.Links is not null)
         {
             for (var i = 0; i < config.Links.Count; i++)
             {
                 var link = config.Links[i];
                 var label = string.IsNullOrWhiteSpace(link.Name) ? $"Links[{i}]" : $"Links[{i}]({link.Name})";
+
+                if (!LinkSources.IsKnown(link.Source))
+                    problems.Add($"{label} 的 Source 只能是 {LinkSources.Manual} 或 {LinkSources.Registry}");
 
                 if (!ValidateLink(link, out var linkError))
                     problems.Add($"{label}：{linkError}");
@@ -199,5 +165,39 @@ public static class ConfigManager
 
         error = string.Join("；", problems);
         return problems.Count == 0;
+    }
+
+    /// <summary>
+    /// 注册配置校验（规格 §4.1）。只在 Enabled 时校验：
+    /// 未启用注册的节点不该因为空字段被拒绝保存。
+    /// </summary>
+    private static void ValidateRegistrar(RegistrarConfig? registrar, List<string> problems)
+    {
+        if (registrar is null || !registrar.Enabled) return;
+
+        if (string.IsNullOrWhiteSpace(registrar.NodeName))
+            problems.Add("Registrar.NodeName 不能为空");
+        if (string.IsNullOrWhiteSpace(registrar.PublicHost))
+            problems.Add("Registrar.PublicHost 不能为空（本端外网地址需手工填写）");
+        if (registrar.PublicPort < 1 || registrar.PublicPort > 65535)
+            problems.Add("Registrar.PublicPort 必须在 1~65535 之间");
+        if (string.IsNullOrWhiteSpace(registrar.CenterHost))
+            problems.Add("Registrar.CenterHost 不能为空");
+        if (registrar.CenterPort < 1 || registrar.CenterPort > 65535)
+            problems.Add("Registrar.CenterPort 必须在 1~65535 之间");
+
+        if (registrar.HeartbeatSeconds < RegistrarConfig.MinIntervalSeconds ||
+            registrar.HeartbeatSeconds > RegistrarConfig.MaxIntervalSeconds)
+            problems.Add($"Registrar.HeartbeatSeconds 必须在 {RegistrarConfig.MinIntervalSeconds}~{RegistrarConfig.MaxIntervalSeconds} 之间");
+
+        if (registrar.SyncSeconds < RegistrarConfig.MinIntervalSeconds ||
+            registrar.SyncSeconds > RegistrarConfig.MaxIntervalSeconds)
+            problems.Add($"Registrar.SyncSeconds 必须在 {RegistrarConfig.MinIntervalSeconds}~{RegistrarConfig.MaxIntervalSeconds} 之间");
+
+        if (registrar.RetryMs < RegistrarConfig.MinRetryMs || registrar.RetryMs > RegistrarConfig.MaxRetryMs)
+            problems.Add($"Registrar.RetryMs 必须在 {RegistrarConfig.MinRetryMs}~{RegistrarConfig.MaxRetryMs} 之间");
+
+        if (registrar.MaxRetries < 0 || registrar.MaxRetries > RegistrarConfig.MaxRetriesLimit)
+            problems.Add($"Registrar.MaxRetries 必须在 0~{RegistrarConfig.MaxRetriesLimit} 之间");
     }
 }

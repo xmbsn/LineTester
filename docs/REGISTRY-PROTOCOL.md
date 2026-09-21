@@ -255,7 +255,6 @@ ACKP  {"xferId":"0a1b2c3d","bitmap":"7"}      // 每 bit 一个块，bit i = 第
 | `auth` | HMAC 校验失败 / 密钥不匹配 | 状态栏报错，**指数退避**重试（不刷屏）；提示核对密钥 |
 | `badrequest` | 字段缺失/格式错 | 状态栏报错，不重试（要改配置） |
 | `loopback` / `unspecified` / `linklocal` | 地址不可分发（§6） | 记录提示，**仍保持心跳**（修好地址后自动恢复分发） |
-| `duplicate_nodeid` | 同一 `nodeId` 从不同来源同时注册 | 状态栏报警：疑似配置被复制到多台机器 |
 | `throttled` | 超过中心限流 | 按 `retryAfter` 等待 |
 | `unsupported` | 对端不是注册中心（老版本或普通节点） | 状态栏提示"该地址不是注册中心"，退避后重试 |
 | `internal` | 中心内部错误 | 退避重试 |
@@ -414,7 +413,12 @@ NodeRecord    { nodeId, name, ip, port, tcp, udp, distributable, centerHidden,
 
 ### 8.6 节点身份
 
-- `NodeId` 首次启动生成并写入配置；**配置被复制到另一台机器**会导致两个实例共用同一身份 → 中心检测到同一 `nodeId` 来自不同源地址且 `lastSeen` 很近时回 `ERR duplicate_nodeid`，并在中心界面标红。
+- `NodeId` 首次启动生成并写入配置；**配置被复制到另一台机器**会导致两个实例共用同一身份。
+- **检测方式（实现期修正）**：不能用"源地址"判断——客户端每次 `REG` 都用新套接字，经 NAT 后**源地址每次都在变**。改为跟踪**进程标识 `instance`**：
+  保存最近两个 `instance`；当收到的 `instance` 等于**上一个**值时（即身份在两组进程间来回跳变），判定为两个实例在交替注册。
+  干净重启（`instance` 换成全新值）**不算**重复。
+- **处置（实现期修正）**：中心**侧只标记** `DuplicateSuspected` 并在节点表标红，**仍然正常返回 ACK**。
+  不回 `ERR`：一旦误判就会阻断该节点的正常同步，代价远大于收益。因此错误码表中**没有** `duplicate_nodeid`。
 - `instance`（进程随机值）用于识别"对端重启过"：中心可据此把节点从离线标回在线（无需等 TTL）。
 - **中心自身的注册**：`ServeAsCenter=true` 且 `Enabled=true`、`CenterHost=127.0.0.1` 时，中心通过回环向自己注册（这样它的记录也进清单，可被其他节点探测）——前提是 `PublicHost` 不是回环地址；若填了回环，它照常被 `loopback` 规则拦下、不分发（这正是"注册中心那台不想被探测"的默认行为）。
 
@@ -530,7 +534,7 @@ NodeRecord    { nodeId, name, ip, port, tcp, udp, distributable, centerHidden,
 | 层 | 用例 |
 |---|---|
 | 纯逻辑 | 帧编解码与非法帧、HMAC（含对原始文本计算）、`ts`/`nonce` 防重放、分块切分与位图合并、快照应用到清单的 7 步规则、TTL 与 rev 递增规则 |
-| 中心 | 真实 UDP 回环：注册→ACK、重复 `reqId` 幂等（rev 不重复递增）、`changed=false` 短路、限流、错误码（loopback/unspecified/linklocal/auth/duplicate_nodeid） |
+| 中心 | 真实 UDP 回环：注册→ACK、重复 `reqId` 幂等（rev 不重复递增）、`changed=false` 短路、限流、错误码（loopback/unspecified/linklocal/auth/unsupported/throttled/internal）；节点疑似重复身份（`instance` 跳变）只标记不阻断 |
 | 端到端 | 同进程起 3 个 `ProbeServer`（不同端口），其一为中心；真实 `REG`/`SYNC`；断言链路自动生成、中心删除后其他节点消失、**离线节点重连后消失**、中心不可达时探测不受影响 |
 | 兼容 | 老式纯回显服务端收到 `LT1|` → 本方 `unsupported` 且无丢包记录；老式探测包进新服务端 → 走回显 |
 | 界面 | 设置页字段往返保存、`selfCheck` 比对提示、`AdvertiseTcp/Udp` 影响生成的链路、注册链路只读、删除提示文案、节点清单表渲染、`centerHidden` 勾选后链路消失、来源列 |

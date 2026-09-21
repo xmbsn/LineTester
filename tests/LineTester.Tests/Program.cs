@@ -17,7 +17,7 @@ namespace LineTester.Tests;
 /// 零依赖自检宿主。覆盖本次修复涉及的纯逻辑与真实回环网络行为。
 /// 退出码 0 = 全部通过，1 = 有失败。
 /// </summary>
-internal static class Program
+internal static partial class Program
 {
     private static int _pass;
     private static readonly List<string> Failures = new();
@@ -41,7 +41,14 @@ internal static class Program
         TestStatSession();
         TestConfigManager();
         await TestCsvLogWriterAsync();
-        TestFailureKinds();        TestLinkRowValidation();
+        TestFailureKinds();
+        TestLinkRowValidation();
+        TestRegistryProtocol();
+        TestRegistryAuth();
+        TestRegistryChunking();
+        TestRegistryAddressRules();
+        TestRegistryStore();
+        TestRegistrySync();
         await TestProbesAsync();
         TestMainWindowClear();
 
@@ -264,10 +271,40 @@ internal static class Program
             Eq("新增字段默认连续丢包阈值", 3, fresh.ConsecutiveLossWarn);
             Eq("新增字段默认勾选 TCP", true, fresh.EnableTcp);
             Eq("新增字段默认勾选 UDP", true, fresh.EnableUdp);
+            Eq("Registrar 段默认不启用（升级后行为不变）", false, fresh.Registrar.Enabled);
+            Eq("Registrar 默认心跳周期", 60, fresh.Registrar.HeartbeatSeconds);
+            Eq("Registrar 默认同步周期", 300, fresh.Registrar.SyncSeconds);
+            Eq("Registrar 默认参与网状", true, fresh.Registrar.Distributable);
+            Eq("Registrar 默认宣告 TCP 与 UDP 均可被探测",
+                true, fresh.Registrar.AdvertiseTcp && fresh.Registrar.AdvertiseUdp);
+            Eq("链路默认来源为本地手工", LinkSources.Manual, fresh.Links[0].Source);
+            Eq("链路默认未停测", false, fresh.Links[0].LocalDisabled);
+            Check("未启用注册时，空 Registrar 字段不影响校验",
+                ConfigManager.Validate(new AppConfig { Links = new List<LinkConfig>() }, out _));
 
             fresh.Links = new List<LinkConfig> { new() { Name = "机房B", Host = "10.1.1.1", Port = 9001 } };
             fresh.LossWarnPercent = 0.5;
             fresh.EnableUdp = false;
+
+            // Registrar 往返（启用后必须填齐本端与中心信息）
+            fresh.Registrar.Enabled = true;
+            fresh.Registrar.ServeAsCenter = true;
+            fresh.Registrar.NodeId = "3f2a9c1d4b5e6f708192a3b4c5d6e7f8";
+            fresh.Registrar.NodeName = "机房A";
+            fresh.Registrar.PublicHost = "203.0.113.10";
+            fresh.Registrar.PublicPort = 50001;
+            fresh.Registrar.CenterHost = "203.0.113.1";
+            fresh.Registrar.CenterPort = 50000;
+            fresh.Registrar.Secret = "s3cret";
+            fresh.Registrar.AdvertiseTcp = false;
+            fresh.Registrar.HeartbeatSeconds = 30;
+            fresh.Links[0].Source = LinkSources.Registry;
+            fresh.Links[0].NodeId = "aa11bb22";
+            fresh.Links[0].LocalDisabled = true;
+
+            Check("填齐后注册配置校验通过",
+                ConfigManager.Validate(fresh, out var enabledDetail), enabledDetail);
+
             ConfigManager.Save(fresh);
 
             var raw = File.ReadAllText(path, Encoding.UTF8);
@@ -284,14 +321,14 @@ internal static class Program
                 var expectedTop = new[]
                 {
                     "ConsecutiveLossWarn", "EnableTcp", "EnableUdp", "IntervalMs", "Links", "ListenPort",
-                    "LossWarnPercent", "StatWindowMinutes", "TimeoutMs", "WarningRttMs"
+                    "LossWarnPercent", "Registrar", "StatWindowMinutes", "TimeoutMs", "WarningRttMs"
                 };
                 Check("顶层字段与配置契约完全一致（无派生字段泄漏）",
                     actualTop.SequenceEqual(expectedTop), string.Join(",", actualTop));
 
                 var actualLink = doc.RootElement.GetProperty("Links")[0].EnumerateObject()
                     .Select(p => p.Name).OrderBy(n => n, StringComparer.Ordinal).ToArray();
-                var expectedLink = new[] { "Host", "Name", "Port", "Tcp", "Udp" };
+                var expectedLink = new[] { "Host", "LocalDisabled", "Name", "NodeId", "Port", "Source", "Tcp", "Udp" };
                 Check("链路字段与配置契约完全一致（不含 Key/Target 等派生字段）",
                     actualLink.SequenceEqual(expectedLink), string.Join(",", actualLink));
             }
@@ -303,6 +340,18 @@ internal static class Program
             Eq("协议开关往返保留（UDP 关闭）", false, reloaded.EnableUdp);
             Eq("协议开关往返保留（TCP 开启）", true, reloaded.EnableTcp);
             Eq("链路数量往返保留", 1, reloaded.Links.Count);
+
+            Eq("Registrar 启用状态往返保留", true, reloaded.Registrar.Enabled);
+            Eq("Registrar 节点名往返保留", "机房A", reloaded.Registrar.NodeName);
+            Eq("Registrar 本端外网地址往返保留", "203.0.113.10", reloaded.Registrar.PublicHost);
+            Eq("Registrar 本端外网端口往返保留", 50001, reloaded.Registrar.PublicPort);
+            Eq("Registrar 中心地址往返保留", "203.0.113.1", reloaded.Registrar.CenterHost);
+            Eq("Registrar 密钥往返保留", "s3cret", reloaded.Registrar.Secret);
+            Eq("Registrar 可被探测协议往返保留（TCP 关闭）", false, reloaded.Registrar.AdvertiseTcp);
+            Eq("Registrar 心跳周期往返保留", 30, reloaded.Registrar.HeartbeatSeconds);
+            Eq("链路来源往返保留", LinkSources.Registry, reloaded.Links[0].Source);
+            Eq("链路来源节点 id 往返保留", "aa11bb22", reloaded.Links[0].NodeId);
+            Eq("本地停测标记往返保留", true, reloaded.Links[0].LocalDisabled);
 
             var commented =
                 "{\n  // 现场加的注释\n  \"ListenPort\": 9100,\n" +

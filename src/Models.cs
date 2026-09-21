@@ -27,6 +27,9 @@ public sealed class AppConfig
 
     public List<LinkConfig> Links { get; set; } = new();
 
+    /// <summary>链路注册与同步（多机房自动互测）配置。默认不启用，行为与升级前完全一致。</summary>
+    public RegistrarConfig Registrar { get; set; } = new();
+
     public static AppConfig Default() => new()
     {
         Links =
@@ -36,6 +39,88 @@ public sealed class AppConfig
     };
 }
 
+/// <summary>链路来源标识。</summary>
+public static class LinkSources
+{
+    /// <summary>本地手工维护（默认；旧配置没有该字段时即此值）。</summary>
+    public const string Manual = "manual";
+
+    /// <summary>由注册中心同步生成/维护。</summary>
+    public const string Registry = "registry";
+
+    public static bool IsKnown(string? source) => source is Manual or Registry;
+}
+
+/// <summary>
+/// 链路注册配置（规格：docs/REGISTRY-PROTOCOL.md §4.1）。
+///
+/// 分两组：本节点（我是谁、别人怎么测我）与注册中心（去哪儿注册）。
+/// <see cref="AdvertiseTcp"/>/<see cref="AdvertiseUdp"/> 与全局的 EnableTcp/EnableUdp
+/// <b>语义不同</b>：前者是"允许别人怎么测我"，后者是"我主动发不发"。
+/// </summary>
+public sealed class RegistrarConfig
+{
+    // ---- 本节点 ----
+
+    /// <summary>是否参与注册同步。false（默认）= 与升级前行为完全一致。</summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>本节点是否承担注册中心角色。</summary>
+    public bool ServeAsCenter { get; set; }
+
+    /// <summary>节点唯一身份（32 位 hex）。为空时首次启动生成；丢失会被当成新节点。</summary>
+    public string NodeId { get; set; } = "";
+
+    /// <summary>显示名（也是生成的链路名）。</summary>
+    public string NodeName { get; set; } = "";
+
+    /// <summary>
+    /// 本端对外地址，<b>必须手工填写</b>：出向连接的 NAT 源端口 ≠ 入向映射端口，
+    /// 因此不能用"注册中心看到的源地址"自动推断（规格 §6.3）。
+    /// </summary>
+    public string PublicHost { get; set; } = "";
+
+    /// <summary>本端对外端口（机房映射的那个）。</summary>
+    public int PublicPort { get; set; }
+
+    /// <summary>是否允许自己被分发给其他节点、被其他节点探测。</summary>
+    public bool Distributable { get; set; } = true;
+
+    /// <summary>是否宣告"本端可被 TCP 探测"。机房只映射了 UDP 时应关闭，避免对端把必然失败判成线路故障。</summary>
+    public bool AdvertiseTcp { get; set; } = true;
+
+    /// <summary>是否宣告"本端可被 UDP 探测"。</summary>
+    public bool AdvertiseUdp { get; set; } = true;
+
+    // ---- 注册中心 ----
+
+    /// <summary>注册中心的外网地址。中心与本机同机时可填 127.0.0.1。</summary>
+    public string CenterHost { get; set; } = "";
+
+    public int CenterPort { get; set; }
+
+    /// <summary>预共享密钥（HMAC）。为空时仍可注册，但清单会标记 unauthenticated。</summary>
+    public string Secret { get; set; } = "";
+
+    /// <summary>心跳注册周期（秒）：保活，也是中心判活的依据。</summary>
+    public int HeartbeatSeconds { get; set; } = 60;
+
+    /// <summary>拉取变更周期（秒）。中心的 reannounceAfter 只允许把它调短。</summary>
+    public int SyncSeconds { get; set; } = 300;
+
+    /// <summary>单次请求重传间隔（毫秒），退避 1×/2×/4×…。</summary>
+    public int RetryMs { get; set; } = 1000;
+
+    /// <summary>单次请求最大重传次数。</summary>
+    public int MaxRetries { get; set; } = 5;
+
+    public const int MinIntervalSeconds = 15;
+    public const int MaxIntervalSeconds = 3600;
+    public const int MinRetryMs = 200;
+    public const int MaxRetryMs = 10000;
+    public const int MaxRetriesLimit = 10;
+}
+
 public sealed class LinkConfig
 {
     public string Name { get; set; } = "";
@@ -43,6 +128,18 @@ public sealed class LinkConfig
     public int Port { get; set; }
     public bool Tcp { get; set; } = true;
     public bool Udp { get; set; } = true;
+
+    /// <summary>链路来源：<see cref="LinkSources.Manual"/>（默认）或 <see cref="LinkSources.Registry"/>。</summary>
+    public string Source { get; set; } = LinkSources.Manual;
+
+    /// <summary>注册来源链路的来源节点身份；本地手工链路为空。</summary>
+    public string NodeId { get; set; } = "";
+
+    /// <summary>
+    /// 本地停测意图。为 true 时，无论注册中心下发什么协议，本链路都不主动探测
+    /// （即"取消勾选 ≠ 删除"，且**同步不会覆盖**这个本地意图）。
+    /// </summary>
+    public bool LocalDisabled { get; set; }
 
     // 注意：不要在这里添加只读的派生属性（例如 Key / Target）。
     // System.Text.Json 会把公开的只读属性一起序列化，导致配置文件里出现
