@@ -170,6 +170,10 @@ public static class ConfigManager
     /// <summary>
     /// 注册配置校验（规格 §4.1）。只在 Enabled 时校验：
     /// 未启用注册的节点不该因为空字段被拒绝保存。
+    ///
+    /// 本端外网地址/端口**只在参与网状时必须填**（它描述"其他节点怎么连本机"）：
+    /// 纯测别人的客户端（<see cref="RegistrarConfig.Distributable"/>=false）不会被分发，
+    /// 没有可被访问的地址也不影响它工作——不该被一条用不上的规则挡住。
     /// </summary>
     private static void ValidateRegistrar(RegistrarConfig? registrar, List<string> problems)
     {
@@ -177,14 +181,24 @@ public static class ConfigManager
 
         if (string.IsNullOrWhiteSpace(registrar.NodeName))
             problems.Add("Registrar.NodeName 不能为空");
-        if (string.IsNullOrWhiteSpace(registrar.PublicHost))
-            problems.Add("Registrar.PublicHost 不能为空（本端外网地址需手工填写）");
-        if (registrar.PublicPort < 1 || registrar.PublicPort > 65535)
-            problems.Add("Registrar.PublicPort 必须在 1~65535 之间");
+
+        if (registrar.Distributable)
+        {
+            if (string.IsNullOrWhiteSpace(registrar.PublicHost))
+                problems.Add("Registrar.PublicHost 不能为空（本端外网地址需手工填写；只想测别人可关闭 Distributable / 界面上的“参与网状”）");
+            if (registrar.PublicPort < 1 || registrar.PublicPort > 65535)
+                problems.Add($"Registrar.PublicPort 必须在 1~65535 之间（当前是 {registrar.PublicPort}）");
+        }
+        else if (registrar.PublicPort != 0 && (registrar.PublicPort < 1 || registrar.PublicPort > 65535))
+        {
+            // 不参与网状时允许整段留空（0），但填了就要填对
+            problems.Add($"Registrar.PublicPort 必须在 1~65535 之间（当前是 {registrar.PublicPort}）");
+        }
+
         if (string.IsNullOrWhiteSpace(registrar.CenterHost))
             problems.Add("Registrar.CenterHost 不能为空");
         if (registrar.CenterPort < 1 || registrar.CenterPort > 65535)
-            problems.Add("Registrar.CenterPort 必须在 1~65535 之间");
+            problems.Add($"Registrar.CenterPort 必须在 1~65535 之间（当前是 {registrar.CenterPort}）");
 
         if (registrar.HeartbeatSeconds < RegistrarConfig.MinIntervalSeconds ||
             registrar.HeartbeatSeconds > RegistrarConfig.MaxIntervalSeconds)

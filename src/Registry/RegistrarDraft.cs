@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Net;
+using System.Net.Sockets;
 
 namespace LineTester.Registry;
 
@@ -101,34 +103,145 @@ public sealed class RegistrarDraft
         if (string.IsNullOrWhiteSpace(NodeName))
             problems.Add("请填写节点名称（也是其他节点上自动生成的链路名）");
 
-        if (string.IsNullOrWhiteSpace(PublicHost))
-            problems.Add("请填写本端外网地址：出方向 NAT 的源端口与入方向映射端口通常不同，" +
-                         "程序无法自动推断，必须手工填写");
-        else if (!IsValidPort(PublicPortText))
-            problems.Add("本端外网端口必须是 1~65535 的整数");
+        // 本端外网地址/端口只有"参与网状"（会被其他节点探测）时才必须提供：
+        // 它描述的是**其他节点怎么连到本机**（机房映射进来的那个地址与端口），
+        // 与"注册中心在哪里"是两回事——现场最容易把这两个端口填混。
+        if (Distributable)
+        {
+            var hostProblem = DescribeHostProblem("本端外网地址", PublicHost, required: true);
+            if (hostProblem.Length > 0)
+            {
+                problems.Add(PublicHost.Trim().Length == 0
+                    ? "请填写本端外网地址（其他节点连本机用的地址，出方向 NAT 源端口 ≠ 入方向映射端口，" +
+                      "必须手工填写）。如果本机只想测别人、不需要被别人测，请取消勾选「参与网状」"
+                    : hostProblem);
+            }
 
-        if (string.IsNullOrWhiteSpace(CenterHost))
-            problems.Add("请填写注册中心地址");
-        else if (!IsValidPort(CenterPortText))
-            problems.Add("注册中心端口必须是 1~65535 的整数");
+            var portProblem = DescribePortProblem("本端外网端口", PublicPortText);
+            if (portProblem.Length > 0) problems.Add(portProblem);
+        }
+        else if (!string.IsNullOrWhiteSpace(PublicHost) || !string.IsNullOrWhiteSpace(PublicPortText))
+        {
+            // 不参与网状时地址可以留空；但填了就要填对，否则会让人以为"改了已经生效"
+            var hostProblem = DescribeHostProblem("本端外网地址", PublicHost, required: false);
+            if (hostProblem.Length > 0) problems.Add(hostProblem);
+
+            var portProblem = DescribePortProblem("本端外网端口", PublicPortText, required: false);
+            if (portProblem.Length > 0) problems.Add(portProblem);
+        }
+
+        var centerHostProblem = DescribeHostProblem("注册中心地址", CenterHost, required: false);
+        if (CenterHost.Trim().Length == 0)
+            problems.Add("请填写注册中心地址（注册中心映射出来的那个地址）");
+        else if (centerHostProblem.Length > 0)
+            problems.Add(centerHostProblem);
+        else
+        {
+            var centerProblem = DescribePortProblem("注册中心端口", CenterPortText);
+            if (centerProblem.Length > 0) problems.Add(centerProblem);
+        }
 
         if (!IsInRange(HeartbeatText, RegistrarConfig.MinIntervalSeconds, RegistrarConfig.MaxIntervalSeconds))
-            problems.Add($"心跳周期必须是 {RegistrarConfig.MinIntervalSeconds}~{RegistrarConfig.MaxIntervalSeconds} 秒的整数");
+            problems.Add($"心跳周期必须是 {RegistrarConfig.MinIntervalSeconds}~{RegistrarConfig.MaxIntervalSeconds} 秒的整数（当前填写的是“{Text(HeartbeatText)}”）");
         if (!IsInRange(SyncText, RegistrarConfig.MinIntervalSeconds, RegistrarConfig.MaxIntervalSeconds))
-            problems.Add($"同步周期必须是 {RegistrarConfig.MinIntervalSeconds}~{RegistrarConfig.MaxIntervalSeconds} 秒的整数");
+            problems.Add($"同步周期必须是 {RegistrarConfig.MinIntervalSeconds}~{RegistrarConfig.MaxIntervalSeconds} 秒的整数（当前填写的是“{Text(SyncText)}”）");
         if (!IsInRange(RetryText, RegistrarConfig.MinRetryMs, RegistrarConfig.MaxRetryMs))
-            problems.Add($"重传间隔必须是 {RegistrarConfig.MinRetryMs}~{RegistrarConfig.MaxRetryMs} 毫秒的整数");
+            problems.Add($"重传间隔必须是 {RegistrarConfig.MinRetryMs}~{RegistrarConfig.MaxRetryMs} 毫秒的整数（当前填写的是“{Text(RetryText)}”）");
         if (!IsInRange(MaxRetriesText, 0, RegistrarConfig.MaxRetriesLimit))
-            problems.Add($"最大重传次数必须是 0~{RegistrarConfig.MaxRetriesLimit} 的整数");
+            problems.Add($"最大重传次数必须是 0~{RegistrarConfig.MaxRetriesLimit} 的整数（当前填写的是“{Text(MaxRetriesText)}”）");
 
         return string.Join("；", problems);
     }
 
+    /// <summary>
+    /// 地址问题的可读说明（空字符串 = 通过）。
+    ///
+    /// 光判"非空"是不够的：`203.0.113`（少一段）、`203.0.113.999`（越界）、`203,0,113,9`（逗号）
+    /// 都会被当成"填好了"，直到运行时解析失败才暴露，而且现象是"链路全部不通"，极难定位。
+    /// IPv4 形状的串必须真的是合法 IPv4；域名按"标签.标签"的形状校验。
+    /// </summary>
+    private static string DescribeHostProblem(string field, string? host, bool required)
+    {
+        var value = host?.Trim() ?? "";
+        if (value.Length == 0) return required ? $"{field}未填写" : "";
+
+        // 只由数字和点组成 → 本来想填 IPv4，必须严格是四段（0~255）
+        //
+        // 注意：这里**不能**用 IPAddress.TryParse 判定。.NET 会把 "203.0.113" 解析成
+        // 203.0.0.113、"0x7f.1" 解析成 127.0.0.1（历史遗留的宽松形式）——用它判定等于放行
+        // "少一段"的地址，而那在运行时的表现是"链路全部不通"，最难查。
+        if (value.All(c => char.IsAsciiDigit(c) || c == '.'))
+        {
+            var parts = value.Split('.');
+            var ok = parts.Length == 4 && parts.All(part =>
+                part.Length is > 0 and <= 3 &&
+                part.All(char.IsAsciiDigit) &&
+                int.TryParse(part, NumberStyles.Integer, CultureInfo.InvariantCulture, out var octet) &&
+                octet is >= 0 and <= 255);
+
+            return ok
+                ? ""
+                : $"{field}不是合法的 IPv4 地址（当前填写的是“{Preview(value)}”，" +
+                  "需要四段且每段 0~255，例如 203.0.113.9）";
+        }
+
+        if (value.Contains(',') || value.Contains('：') || value.Contains('。') || value.Contains(' '))
+            return $"{field}含有非法字符（当前填写的是“{Preview(value)}”，请用半角英文的 . 与 : ）";
+
+        // IPv6 字面量：协议层允许（双栈），此处不拦
+        if (IPAddress.TryParse(value, out var literal) &&
+            literal.AddressFamily == AddressFamily.InterNetworkV6)
+        {
+            return "";
+        }
+
+        // 全角数字/字母混在里面（"２０３.0.113.9"）→ 明确说出来
+        if (value.Any(c => char.IsDigit(c) && !char.IsAsciiDigit(c)))
+            return $"{field}含全角数字（当前填写的是“{Preview(value)}”，请切到半角输入）";
+
+        // 域名形状：标签由字母/数字/连字符组成，允许点分多段
+        var labels = value.Split('.');
+        var hostnameOk = labels.Length >= 1 && labels.All(label =>
+            label.Length is > 0 and <= 63 &&
+            label.All(c => char.IsAsciiLetterOrDigit(c) || c == '-' || c == '_'));
+
+        return hostnameOk
+            ? ""
+            : $"{field}格式不正确（当前填写的是“{Preview(value)}”）";
+    }
+
+    /// <summary>
+    /// 端口问题的可读说明（空字符串 = 通过）。
+    ///
+    /// 必须把**当前填的内容**回显出来：现场最容易出现的不是"填了 16298 被判错"，
+    /// 而是"这个框其实是空的/混进了全角字符"，而原来的提示只会说"必须是 1~65535"，
+    /// 让人以为程序算错了。
+    /// </summary>
+    private static string DescribePortProblem(string field, string? text, bool required = true)
+    {
+        var raw = text ?? "";
+        var trimmed = raw.Trim();
+
+        if (trimmed.Length == 0)
+            return required ? $"{field}未填写（必须是 1~65535 的整数）" : "";
+
+        if (!int.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value))
+        {
+            return $"{field}必须是 1~65535 的整数（当前填写的是“{Preview(trimmed)}”，" +
+                   "请检查是否混入了空格、全角数字或其它字符）";
+        }
+
+        return value is < 1 or > 65535
+            ? $"{field}必须在 1~65535 之间（当前填写的是 {value}）"
+            : "";
+    }
+
+    private static string Text(string? text) => Preview(text?.Trim() ?? "");
+
+    private static string Preview(string text) => text.Length <= 12 ? text : text[..12] + "…";
+
     private static int ParseInt(string? text)
         => int.TryParse(text?.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value) ? value : 0;
-
-    private static bool IsValidPort(string? text)
-        => IsInRange(text, 1, 65535);
 
     private static bool IsInRange(string? text, int min, int max)
     {

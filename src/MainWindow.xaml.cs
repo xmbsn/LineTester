@@ -67,10 +67,13 @@ public partial class MainWindow : Window
     private Task? _loop;
 
     /// <summary>
-    /// 探测循环每轮读取的链路快照。注册中心同步到新链路时**无需重启测试**即可开始探测
-    /// （网状测试的自动发现就靠这一点；手工改动仍按老规矩"点启动测试后生效"）。
+    /// 探测循环每轮读取的链路快照。注册中心同步到新链路、以及编辑器里的改动都会刷新它，
+    /// 因此"取消勾选 TCP""改目标"等改动**不必重启测试**（现场反馈：界面写着"不发包"、包却照发）。
     /// </summary>
     private volatile LinkConfig[] _liveLinks = Array.Empty<LinkConfig>();
+
+    /// <summary>链路编辑器最近一次改动的时刻（防抖用）；null = 没有待生效的改动。</summary>
+    private DateTime? _linksDirtyUtc;
 
     // ---- 注册中心（切片 3）----
 
@@ -206,6 +209,13 @@ public partial class MainWindow : Window
             // 恢复探测时立刻同步一次，否则要等一个同步周期才拿回对端宣告的协议
             if (!disabled && _registryClient is not null) _ = _registryClient.RegisterNowAsync();
         }
+        else if (sender is LinkRow toggledRow &&
+                 e.PropertyName is nameof(LinkRow.Tcp) or nameof(LinkRow.Udp) &&
+                 toggledRow.IsValid)
+        {
+            // 协议勾选只可能"收紧"发包范围 → 立刻生效，不必等防抖
+            ToggleLiveProtocol(toggledRow);
+        }
 
         RevalidateLinks();
     }
@@ -249,6 +259,9 @@ public partial class MainWindow : Window
         }
 
         UpdateLinkSummary();
+
+        // 编辑器改动 → 稍后（防抖）交给运行中的探测循环，见 ApplyLiveLinks
+        _linksDirtyUtc = DateTime.UtcNow;
         return _linkRows.All(r => r.IsValid);
     }
 
@@ -284,10 +297,10 @@ public partial class MainWindow : Window
 
         var signature = LinksSignature();
         if (!string.Equals(signature, _savedLinksSignature, StringComparison.Ordinal))
-            parts.Add("有未保存的修改");
+            parts.Add("有未保存的修改（点“保存配置”写入文件；探测已在用新链路）");
 
         if (_cts is not null && !string.Equals(signature, _appliedLinksSignature, StringComparison.Ordinal))
-            parts.Add("⚠ 运行中的测试仍在使用启动时的链路，点“启动测试”后生效");
+            parts.Add("刚改动的链路将在 1 秒内生效（防抖：避免边打字边发包）");
 
         // 全局与链路冲突时提示谁说了算
         var suppressed = _linkRows.Where(r => r.IsValid).SelectMany(r =>
@@ -825,10 +838,12 @@ public partial class MainWindow : Window
         }
 
         _settings.Links = outcome.Links;
-        _liveLinks = _settings.Links.ToArray();
 
         SyncRegistryRows(outcome.Links);
-        _appliedLinksSignature = LinksSignatureOf(_settings.Links);
+
+        // 交给防抖统一重建生效链路：它从"编辑器里的行"取数，
+        // 因此既包含刚同步下来的注册链路，也不会丢掉用户尚未保存的手工改动。
+        _linksDirtyUtc = DateTime.UtcNow;
 
         var persisted = TryPersistConfigQuietly(out var saveError);
 
@@ -1038,9 +1053,77 @@ public partial class MainWindow : Window
     private void OnUiTick(object? sender, EventArgs e)
     {
         DrainPendingResults();
+        ApplyLiveLinksIfDue();
         RefreshStats();
         RefreshRegistryUi();
         RefreshStatusBar();
+    }
+
+    /// <summary>
+    /// 链路编辑器改动后约 1 秒生效（防抖）。
+    ///
+    /// 为什么必须即时生效：现场把某条链路的 TCP 取消勾选后，界面写着"不发包"、TCP 探测包却照发，
+    /// 统计跟着失真——这是被现场反馈抓到的真实问题（根因是循环只读了启动时的链路快照）。
+    /// 为什么要防抖：端口是一格一格敲进去的（9 → 90 → 900 → 9001），逐字符立即生效会真的往
+    /// 9 端口发探测包；等敲完再切，既不迟到也不打垃圾包。
+    /// </summary>
+    private void ApplyLiveLinksIfDue()
+    {
+        var dirty = _linksDirtyUtc;
+        if (dirty is null) return;
+        if (DateTime.UtcNow - dirty.Value < TimeSpan.FromSeconds(1)) return;
+
+        ApplyLiveLinks();
+    }
+
+    /// <summary>把编辑器里的链路交给正在运行的探测循环（克隆一份，避免与配置对象互相影响）。</summary>
+    private void ApplyLiveLinks()
+    {
+        _linksDirtyUtc = null;
+
+        var links = _linkRows.Where(r => r.IsValid).Select(r => Clone(r.ToConfig())).ToList();
+
+        // 未运行时也照样维护：定时器/同步随时可能触发，保持"生效链路 = 编辑器内容"这一条不变式，
+        // 运行中的循环每轮读的就是它。
+        _liveLinks = links.ToArray();
+        _appliedLinksSignature = LinksSignatureOf(links);
+        UpdateLinkSummary();
+    }
+
+    private static LinkConfig Clone(LinkConfig link) => new()
+    {
+        Name = link.Name,
+        Host = link.Host,
+        Port = link.Port,
+        Tcp = link.Tcp,
+        Udp = link.Udp,
+        Source = link.Source,
+        NodeId = link.NodeId,
+        LocalDisabled = link.LocalDisabled
+    };
+
+    /// <summary>
+    /// 只改协议勾选时**立刻**作用到运行中的链路：它只会"收窄"发包范围，
+    /// 不可能把包打到半截的地址上（主机/端口改动仍走 1 秒防抖）。
+    /// 现场反馈：取消勾选 TCP 后界面写着"不发包"、包却照发，统计也跟着失真。
+    /// </summary>
+    private void ToggleLiveProtocol(LinkRow row)
+    {
+        if (_cts is null) return;
+
+        var applied = _liveLinks.FirstOrDefault(l =>
+            string.Equals(l.Name, row.Name.Trim(), StringComparison.Ordinal) &&
+            string.Equals(l.Host, row.Host.Trim(), StringComparison.OrdinalIgnoreCase) &&
+            l.Port == row.Port);
+
+        if (applied is null) return; // 还没生效过的行（例如刚新增）→ 交给防抖
+
+        // 探测循环每轮重新读取这两个字段，因此下一轮就停止发送
+        applied.Tcp = row.Tcp;
+        applied.Udp = row.Udp;
+
+        _appliedLinksSignature = LinksSignatureOf(_liveLinks);
+        UpdateLinkSummary();
     }
 
     private void DrainPendingResults()
@@ -1133,8 +1216,13 @@ public partial class MainWindow : Window
     /// <summary>当前实际会发出去的探测路数（链路 × 已勾选协议，再与链路自身的开关取交集）。</summary>
     private int ActiveProbeCount()
     {
+        // 运行中以探测循环真正在用的链路为准（编辑器改动有约 1 秒防抖）
+        var links = _cts is not null
+            ? _liveLinks
+            : _linkRows.Where(r => r.IsValid).Select(r => r.ToConfig()).ToArray();
+
         var count = 0;
-        foreach (var link in _settings.Links)
+        foreach (var link in links)
         {
             if (_liveTcp && link.Tcp) count++;
             if (_liveUdp && link.Udp) count++;

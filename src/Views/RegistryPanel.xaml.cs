@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using LineTester.Registry;
 
@@ -16,8 +17,16 @@ namespace LineTester.Views;
 /// </summary>
 public partial class RegistryPanel : UserControl
 {
-    private static readonly Brush NormalBrush = new SolidColorBrush(Color.FromRgb(0x5F, 0x63, 0x68));
-    private static readonly Brush WarningBrush = new SolidColorBrush(Color.FromRgb(0xB2, 0x6A, 0x00));
+    // 同样必须 Freeze()：静态 Freezable 属于创建它的线程，而自检每个界面用例都在新的 STA 线程上跑
+    private static readonly Brush NormalBrush = Frozen(0x5F, 0x63, 0x68);
+    private static readonly Brush WarningBrush = Frozen(0xB2, 0x6A, 0x00);
+
+    private static SolidColorBrush Frozen(byte r, byte g, byte b)
+    {
+        var brush = new SolidColorBrush(Color.FromRgb(r, g, b));
+        brush.Freeze();
+        return brush;
+    }
 
     private readonly ObservableCollection<RegistryNodeRow> _nodeRows = new();
 
@@ -40,6 +49,14 @@ public partial class RegistryPanel : UserControl
         SecretTextBox.TextChanged += (_, _) => SyncSecret(fromPasswordBox: false);
         ShowSecretCheck.Checked += (_, _) => ApplySecretVisibility();
         ShowSecretCheck.Unchecked += (_, _) => ApplySecretVisibility();
+
+        // 所有数字框一律只收半角数字：现场曾把 IP 敲进端口框，得到的报错看不懂
+        RestrictToDigits(PublicPortBox, 5);
+        RestrictToDigits(CenterPortBox, 5);
+        RestrictToDigits(HeartbeatBox, 4);
+        RestrictToDigits(SyncBox, 4);
+        RestrictToDigits(RetryBox, 5);
+        RestrictToDigits(MaxRetriesBox, 2);
     }
 
     /// <summary>点「保存配置」：交给主窗口统一校验并落盘（与窗口底部按钮同一条路径）。</summary>
@@ -271,6 +288,41 @@ public partial class RegistryPanel : UserControl
     {
         if (note is null) return NormalBrush;
         return note.Warning ? WarningBrush : NormalBrush;
+    }
+
+    /// <summary>
+    /// 把输入框限制成"最多 N 位半角数字"。
+    /// 端口/周期这类字段一旦允许任意字符，现场就可能把 IP（"203.0.113.9"）或中文敲进去，
+    /// 而报错只说"必须是 1~65535"——从输入源头挡掉比事后解释便宜得多。
+    /// </summary>
+    private static void RestrictToDigits(TextBox box, int maxLength)
+    {
+        box.MaxLength = maxLength;
+
+        box.PreviewTextInput += (_, e) =>
+        {
+            if (e.Text.Length == 0 || !e.Text.All(char.IsAsciiDigit)) e.Handled = true;
+        };
+
+        box.PreviewKeyDown += (_, e) =>
+        {
+            if (e.Key == Key.Space) e.Handled = true;
+        };
+
+        DataObject.AddPastingHandler(box, (_, e) =>
+        {
+            if (!e.SourceDataObject.GetDataPresent(DataFormats.UnicodeText)) return;
+
+            var text = e.SourceDataObject.GetData(DataFormats.UnicodeText) as string ?? "";
+            var digits = new string(text.Where(char.IsAsciiDigit).ToArray());
+
+            // 粘贴的内容里没有数字（例如整段 IP 被粘进来）→ 直接拒绝，不留半截垃圾
+            if (digits.Length == 0 || !digits.All(char.IsAsciiDigit) || text.Length != digits.Length)
+            {
+                e.CancelCommand();
+                return;
+            }
+        });
     }
 
     /// <summary>密钥在"密码框 / 文本框"之间同步，避免任何一边停留在旧值。</summary>

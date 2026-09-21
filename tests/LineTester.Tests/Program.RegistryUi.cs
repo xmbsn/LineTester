@@ -7,6 +7,7 @@ using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
+using System.Windows.Media;
 using LineTester.Registry;
 using LineTester.Views;
 
@@ -156,6 +157,145 @@ internal static partial class Program
         var hostname = RegistrarDraft.From(source);
         hostname.PublicHost = "vpn.example.com";
         Eq("主机名形式的外网地址通过校验", "", hostname.Validate());
+
+        // ---- 现场反馈：映射端口（例如 16298）绝不能被判成越界 ----
+        var mapped = RegistrarDraft.From(source);
+        mapped.PublicPortText = "16298";
+        mapped.CenterPortText = "16298";
+        Eq("映射端口 16298 两端都合法", "", mapped.Validate());
+
+        var minMax = RegistrarDraft.From(source);
+        minMax.PublicPortText = "1";
+        minMax.CenterPortText = "65535";
+        Eq("端口边界 1 与 65535 都合法", "", minMax.Validate());
+
+        // 报错时必须回显"实际读到的是什么"：否则只会看到"必须是 1~65535"，
+        // 而自己明明填了 16298（其实是空值 / 全角 / 混了字符）
+        var blank = RegistrarDraft.From(source);
+        blank.PublicPortText = "";
+        var blankError = blank.Validate();
+        Check("外网端口为空时提示“未填写”而不是笼统的整数要求",
+            blankError.Contains("本端外网端口未填写"), blankError);
+
+        var fullWidth = RegistrarDraft.From(source);
+        fullWidth.PublicPortText = "１６２９８"; // 中文输入法全角数字
+        var fullWidthError = fullWidth.Validate();
+        Check("全角数字被拦下并回显原样内容",
+            fullWidthError.Contains("本端外网端口") && fullWidthError.Contains("１６２９８") &&
+            fullWidthError.Contains("全角"), fullWidthError);
+
+        var spaced = RegistrarDraft.From(source);
+        spaced.PublicPortText = " 16298 ";
+        Eq("前后空格自动忽略（16298 仍然合法）", "", spaced.Validate());
+
+        var overRange = RegistrarDraft.From(source);
+        overRange.PublicPortText = "70000";
+        var overRangeError = overRange.Validate();
+        Check("越界端口提示里带上当前值",
+            overRangeError.Contains("之间") && overRangeError.Contains("70000"), overRangeError);
+
+        var blankCenterPort = RegistrarDraft.From(source);
+        blankCenterPort.CenterPortText = "";
+        Check("中心端口为空时明确指出是哪一个框",
+            blankCenterPort.Validate().Contains("注册中心端口未填写"), blankCenterPort.Validate());
+
+        // ---- 地址格式：只判"非空"是不够的，填错地址的现象是"链路全不通"，极难定位 ----
+        var partialIp = RegistrarDraft.From(source);
+        partialIp.PublicHost = "203.0.113";
+        var partialError = partialIp.Validate();
+        Check("少一段的 IPv4 被拦下并回显原样内容",
+            partialError.Contains("本端外网地址") && partialError.Contains("合法的 IPv4") &&
+            partialError.Contains("203.0.113"), partialError);
+
+        var overOctet = RegistrarDraft.From(source);
+        overOctet.PublicHost = "203.0.113.999";
+        Check("越界段（999）被拦下",
+            overOctet.Validate().Contains("合法的 IPv4"), overOctet.Validate());
+
+        var commaIp = RegistrarDraft.From(source);
+        commaIp.PublicHost = "203,0,113,9";
+        Check("用逗号分隔的地址被拦下并提示用半角点",
+            commaIp.Validate().Contains("非法字符"), commaIp.Validate());
+
+        var fullWidthIp = RegistrarDraft.From(source);
+        fullWidthIp.PublicHost = "２０３.0.113.9";
+        Check("全角数字的地址被拦下", fullWidthIp.Validate().Contains("本端外网地址"), fullWidthIp.Validate());
+
+        var badCenterIp = RegistrarDraft.From(source);
+        badCenterIp.CenterHost = "203.0.113";
+        Check("中心地址少一段也被拦下",
+            badCenterIp.Validate().Contains("注册中心地址"), badCenterIp.Validate());
+
+        var loopbackIp = RegistrarDraft.From(source);
+        loopbackIp.PublicHost = "127.0.0.1";
+        Eq("回环地址本身是合法 IPv4（是否分发由地址规则在别处判断）", "", loopbackIp.Validate());
+
+        // ---- 纯客户端：只想测别人、不需要被别人测 → 不要求自己的外网地址/端口 ----
+        var clientOnly = RegistrarDraft.From(source);
+        clientOnly.Distributable = false;
+        clientOnly.PublicHost = "";
+        clientOnly.PublicPortText = "";
+        Eq("关闭「参与网状」后，本端外网地址/端口可以留空", "", clientOnly.Validate());
+
+        var clientOnlyBadPort = RegistrarDraft.From(source);
+        clientOnlyBadPort.Distributable = false;
+        clientOnlyBadPort.PublicPortText = "70000";
+        Check("关闭「参与网状」但填了越界端口仍然拦下（填了就要填对）",
+            clientOnlyBadPort.Validate().Contains("本端外网端口"), clientOnlyBadPort.Validate());
+
+        var clientOnlyWrite = new RegistrarConfig();
+        var clientOnlyDraft = RegistrarDraft.From(source);
+        clientOnlyDraft.Distributable = false;
+        clientOnlyDraft.PublicHost = "";
+        clientOnlyDraft.PublicPortText = "";
+        Check("纯客户端配置可写回", clientOnlyDraft.TryApply(clientOnlyWrite, out var clientOnlyError), clientOnlyError);
+        Eq("纯客户端的外网端口写回为 0", 0, clientOnlyWrite.PublicPort);
+        Eq("纯客户端的外网地址写回为空", "", clientOnlyWrite.PublicHost);
+        Eq("纯客户端仍要填中心地址", "203.0.113.1", clientOnlyWrite.CenterHost);
+
+        Check("配置层校验同样放行纯客户端（Distributable=false）",
+            ConfigManager.Validate(new AppConfig { Registrar = clientOnlyWrite }, out var configError), configError);
+
+        // ---- 中心侧：纯客户端（无地址、不可分发）必须能注册上，否则它连别人都测不了 ----
+        var storeRoot = Path.Combine(AppContext.BaseDirectory, ".testtmp", "clientonly_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(storeRoot);
+        var store = new RegistryStore(Path.Combine(storeRoot, "registry.json"), 60);
+
+        var clientOnlyNode = store.Upsert(new RegisterMessage
+        {
+            NodeId = "client-only",
+            Name = "只看别人",
+            Ip = "",
+            Port = 0,
+            Tcp = false,
+            Udp = false,
+            Distributable = false
+        }, authenticated: true);
+
+        Check("纯客户端能注册（不参与网状 → 不做地址检查）", clientOnlyNode.Accepted,
+            clientOnlyNode.ErrorCode + " " + clientOnlyNode.ErrorMessage);
+        Check("纯客户端照常出现在中心清单里（供运维查看）",
+            store.Nodes.Any(n => n.NodeId == "client-only"));
+        Eq("纯客户端不会被分发出去（快照里没有它）", 0, store.BuildSnapshot().Count);
+
+        // 参与网状的节点仍然必须提供可用地址（回环会让别人测到自己）
+        var loopbackNode = store.Upsert(new RegisterMessage
+        {
+            NodeId = "loop-node",
+            Name = "回环节点",
+            Ip = "127.0.0.1",
+            Port = 8800,
+            Distributable = true
+        }, authenticated: true);
+        Check("参与网状的节点填回环地址仍被拒绝", !loopbackNode.Accepted);
+        Eq("拒绝码为 loopback", RegistryErrorCodes.Loopback, loopbackNode.ErrorCode);
+
+        var row = RegistryNodeRow.FromNode(store.Nodes.First(n => n.NodeId == "client-only"),
+            DateTime.UtcNow, (_, _) => true);
+        Check("无地址的节点在中心表里显示为“未提供”，而不是 :0",
+            row.Address.Contains("未提供"), row.Address);
+
+        try { Directory.Delete(storeRoot, true); } catch { }
     }
 
     // ---------------- 文案 ----------------
@@ -379,8 +519,8 @@ internal static partial class Program
 
             Check("含“参与注册同步”开关", panel.FindName("EnabledCheck") is CheckBox);
             Check("含节点名称输入框", panel.FindName("NodeNameBox") is TextBox);
-            Check("含本端外网地址输入框", panel.FindName("PublicHostBox") is TextBox);
-            Check("含注册中心地址输入框", panel.FindName("CenterHostBox") is TextBox);
+            Check("含本端外网地址输入框（标准 IPv4 四段式）", panel.FindName("PublicHostBox") is Ipv4Box);
+            Check("含注册中心地址输入框（标准 IPv4 四段式）", panel.FindName("CenterHostBox") is Ipv4Box);
             Check("含密钥密码框", panel.FindName("SecretBox") is PasswordBox);
             Check("含“显示密钥”开关", panel.FindName("ShowSecretCheck") is CheckBox);
             Check("含可被 TCP 探测开关", panel.FindName("AdvertiseTcpCheck") is CheckBox);
@@ -408,9 +548,9 @@ internal static partial class Program
             panel.Load(config);
 
             Eq("界面按配置填充节点名称", "机房A", ((TextBox)panel.FindName("NodeNameBox")!).Text);
-            Eq("界面按配置填充外网地址", "203.0.113.9", ((TextBox)panel.FindName("PublicHostBox")!).Text);
+            Eq("界面按配置填充外网地址", "203.0.113.9", ((Ipv4Box)panel.FindName("PublicHostBox")!).Text);
             Eq("界面按配置填充外网端口", "9000", ((TextBox)panel.FindName("PublicPortBox")!).Text);
-            Eq("界面按配置填充中心地址", "203.0.113.1", ((TextBox)panel.FindName("CenterHostBox")!).Text);
+            Eq("界面按配置填充中心地址", "203.0.113.1", ((Ipv4Box)panel.FindName("CenterHostBox")!).Text);
             Eq("界面按配置填充密钥", "s3cret", ((PasswordBox)panel.FindName("SecretBox")!).Password);
             Eq("界面显示节点身份", config.NodeId, ((TextBlock)panel.FindName("NodeIdText")!).Text);
             Check("密钥默认隐藏", ((PasswordBox)panel.FindName("SecretBox")!).Visibility == Visibility.Visible &&
@@ -438,6 +578,22 @@ internal static partial class Program
             Eq("拦下时端口未被改写", keepPort, target.PublicPort);
 
             ((TextBox)panel.FindName("NodeNameBox")!).Text = "机房A-新";
+
+            // 现场报错的那个场景：机房映射端口 16298 填进来必须能通过，且两组端口互不干扰
+            ((TextBox)panel.FindName("PublicPortBox")!).Text = "16298";
+            ((TextBox)panel.FindName("CenterPortBox")!).Text = "16298";
+            var mappedTarget = new RegistrarConfig();
+            Check("界面里填映射端口 16298 能读回配置",
+                panel.TryReadInto(mappedTarget, out var mappedError), mappedError);
+            Eq("读回：本端外网端口 16298", 16298, mappedTarget.PublicPort);
+            Eq("读回：注册中心端口 16298", 16298, mappedTarget.CenterPort);
+
+            // 留空时必须说清是哪个框、它是什么（原来只说"必须是 1~65535"，现场以为程序算错了）
+            ((TextBox)panel.FindName("PublicPortBox")!).Text = "";
+            Check("界面里外网端口留空时，提示指出具体是哪个框",
+                !panel.TryReadInto(new RegistrarConfig(), out var emptyPortError) &&
+                emptyPortError.Contains("本端外网端口未填写"), emptyPortError);
+            ((TextBox)panel.FindName("PublicPortBox")!).Text = "16298";
 
             // 密钥“显示”切换：两个输入框必须同步，不能一个显示旧值
             ((CheckBox)panel.FindName("ShowSecretCheck")!).IsChecked = true;
@@ -685,8 +841,8 @@ internal static partial class Program
                     binding.Path.Path == nameof(LinkRow.Diagnosis)));
 
             Check("注册页按配置回填（含本端外网地址）",
-                ((TextBox)panel!.FindName("PublicHostBox")!).Text == "203.0.113.9",
-                ((TextBox)panel.FindName("PublicHostBox")!).Text);
+                ((Ipv4Box)panel!.FindName("PublicHostBox")!).Text == "203.0.113.9",
+                ((Ipv4Box)panel.FindName("PublicHostBox")!).Text);
             Check("承担中心角色时中心管理区可见",
                 ((Border)panel.FindName("CenterSection")!).Visibility == Visibility.Visible);
 
@@ -719,10 +875,15 @@ internal static partial class Program
                 linkRows.Cast<LinkRow>().First(r => r.NodeId == "peer-a").Diagnosis.Contains("注册中心"),
                 linkRows.Cast<LinkRow>().First(r => r.NodeId == "peer-a").Diagnosis);
 
-            // 新链路必须立刻进入探测集合（网格测试自动发现的关键：不必重启测试）
+            // 新链路必须立刻进入探测集合（网格测试自动发现的关键：不必重启测试）。
+            // 生效走"约 1 秒防抖"（避免边打字边发包），这里等到它成立为止。
+            Check("新链路立刻进入探测集合（无需重启测试）",
+                PumpUntil(() => ((LinkConfig[])GetPrivateField(window, "_liveLinks")!).Length == 3),
+                "当前 " + ((LinkConfig[])GetPrivateField(window, "_liveLinks")!).Length + " 条");
+
             var liveLinks = (LinkConfig[])GetPrivateField(window, "_liveLinks")!;
-            Eq("新链路立刻进入探测集合（无需重启测试）", 3, liveLinks.Length);
-            Check("探测集合里包含注册链路", liveLinks.Any(l => l.Source == LinkSources.Registry));
+            Check("探测集合里包含注册链路", liveLinks.Any(l => l.Source == LinkSources.Registry),
+                string.Join(" / ", liveLinks.Select(l => $"{l.Name}:{l.Source}")));
 
             // 落盘：注册链路必须带上来源，否则下次启动会变成手工链路
             var saved = ConfigManager.Load(out var loadError);
@@ -919,6 +1080,7 @@ internal static partial class Program
             var loaded = ConfigManager.Load(out var error);
             Eq("模板可被读取（注释与尾逗号不报错）", "", error ?? "");
             Eq("模板里注册默认不启用（升级后行为不变）", false, loaded.Registrar.Enabled);
+            Eq("模板里的监听端口与代码默认值一致", new AppConfig().ListenPort, loaded.ListenPort);
             Eq("模板里链路默认是本地手工链路", LinkSources.Manual, loaded.Links[0].Source);
             Eq("模板里示例链路的目标端口", 9001, loaded.Links[0].Port);
             Check("模板里的注册字段被认出来（不是被当成未知键丢掉）",
@@ -949,6 +1111,226 @@ internal static partial class Program
         }
 
         return null;
+    }
+
+    // ---------------- 运行中改链路（现场反馈） ----------------
+
+    /// <summary>
+    /// 现场反馈的两件事，用"能数包的纯回显服务端"实测：
+    /// ① 运行中把某条链路的 TCP 取消勾选后，**必须真的停止发 TCP**（原来界面写着"不发包"，包却照发）；
+    /// ② 明细里的协议标注必须与对端**实际收到的包**一一对应（"发 TCP 却显示 UDP"）。
+    /// </summary>
+    private static void TestLinkToggleWhileRunning()
+    {
+        Section("运行中改链路：取消勾选 TCP 立刻停发；明细协议标注与实际发包一致");
+
+        var port = FindBindablePort();
+        using var echo = new CountingEchoServer(port);
+
+        try
+        {
+            echo.Start();
+        }
+        catch
+        {
+            Check("计数回显服务端启动", false, "端口不可绑定");
+            return;
+        }
+
+        var listenPort = FindBindablePort();
+        var root = Path.Combine(AppContext.BaseDirectory, ".testtmp", "toggle_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        var previousOverride = ConfigManager.OverridePath;
+        ConfigManager.OverridePath = Path.Combine(root, "appsettings.json");
+
+        ConfigManager.Save(new AppConfig
+        {
+            ListenPort = listenPort,
+            IntervalMs = 200,
+            TimeoutMs = 500,
+            Links = { new LinkConfig { Name = "本机", Host = "127.0.0.1", Port = port, Tcp = true, Udp = true } }
+        });
+
+        RunOnSta(() =>
+        {
+            var window = new MainWindow();
+            InvokePrivateHandler(window, "Start_Click");
+            Pump(2000);
+
+            var trend = (IList)GetPrivateField(window, "_trend")!;
+            var rows = (IList)GetPrivateField(window, "_linkRows")!;
+            var session = (StatSession)GetPrivateField(window, "_session")!;
+            var tcpGlobal = (CheckBox)window.FindName("TcpCheck")!;
+            var udpGlobal = (CheckBox)window.FindName("UdpCheck")!;
+
+            Check("TCP 探测确实到达对端", echo.TcpCount > 0, "tcp=" + echo.TcpCount);
+            Check("UDP 探测确实到达对端", echo.UdpCount > 0, "udp=" + echo.UdpCount);
+
+            // ② 明细里的协议标注 vs 对端**实际收到的包**。
+            //    用"只开一个协议"来做判定，比数行数更硬：只开 TCP 时，对端一个 UDP 都不该收到，
+            //    明细里也不该出现任何 UDP 行（反之亦然）。
+            udpGlobal.IsChecked = false; // 全局只留 TCP
+            InvokePrivateHandler(window, "Clear_Click");
+
+            var tcpBeforeTcpOnly = echo.TcpCount;
+            var udpBeforeTcpOnly = echo.UdpCount;
+            Pump(2000);
+
+            Check("只勾 TCP 时明细里全是 TCP 行（没有把 TCP 标成 UDP）",
+                trend.Count > 0 && trend.Cast<ProbeResult>().All(r => r.Protocol == "TCP"),
+                "协议取值：" + string.Join(",", trend.Cast<ProbeResult>().Select(r => r.Protocol).Distinct()));
+            Check("只勾 TCP 时对端几乎不再收到 UDP（最多允许切换那一刻已在途的 1 个）",
+                echo.UdpCount - udpBeforeTcpOnly <= 1 && echo.TcpCount > tcpBeforeTcpOnly,
+                $"tcp {tcpBeforeTcpOnly}→{echo.TcpCount} / udp {udpBeforeTcpOnly}→{echo.UdpCount}");
+            Check("会话样本数与对端收到的探测数一致（结果没有被吞）",
+                Math.Abs(session.TotalSamples - (echo.TcpCount - tcpBeforeTcpOnly)) <= 2,
+                $"样本 {session.TotalSamples} / 对端新增 {echo.TcpCount - tcpBeforeTcpOnly}");
+
+            udpGlobal.IsChecked = true;  // 全局只留 UDP
+            tcpGlobal.IsChecked = false;
+            InvokePrivateHandler(window, "Clear_Click");
+
+            var tcpBeforeUdpOnly = echo.TcpCount;
+            var udpBeforeUdpOnly = echo.UdpCount;
+            Pump(2000);
+
+            Check("只勾 UDP 时明细里全是 UDP 行",
+                trend.Count > 0 && trend.Cast<ProbeResult>().All(r => r.Protocol == "UDP"),
+                "协议取值：" + string.Join(",", trend.Cast<ProbeResult>().Select(r => r.Protocol).Distinct()));
+            Check("只勾 UDP 时对端几乎不再收到 TCP（同上，最多 1 个在途）",
+                echo.TcpCount - tcpBeforeUdpOnly <= 1 && echo.UdpCount > udpBeforeUdpOnly,
+                $"tcp {tcpBeforeUdpOnly}→{echo.TcpCount} / udp {udpBeforeUdpOnly}→{echo.UdpCount}");
+
+            tcpGlobal.IsChecked = true; // 恢复两个协议，继续做"运行中改链路"的验证
+            InvokePrivateHandler(window, "Clear_Click");
+            Pump(1500);
+
+            // ① 运行中取消该链路的 TCP 勾选 → 立刻停发 TCP
+            //    （协议勾选是"收紧"，立即生效；主机/端口改动才有 1 秒防抖）
+            ((LinkRow)rows[0]!).Tcp = false;
+
+            Pump(1200); // 让"已经发起的那一轮"跑完
+            var tcpAfterToggle = echo.TcpCount;
+            var udpAtToggle = echo.UdpCount;
+
+            Pump(2500); // 再看一段时间：不该再有任何新的 TCP 探测
+
+            Check("取消勾选 TCP 后对端不再收到新的 TCP 探测", echo.TcpCount == tcpAfterToggle,
+                $"切换后 {tcpAfterToggle} → 再等 2.5 秒 {echo.TcpCount}");
+            Check("同一链路仍在正常发 UDP", echo.UdpCount > udpAtToggle, $"udp {udpAtToggle} → {echo.UdpCount}");
+            Check("该链路「生效」列同步显示只发 UDP", ((LinkRow)rows[0]!).Effective == "UDP",
+                ((LinkRow)rows[0]!).Effective);
+
+            // 重新勾上 → 必须恢复发 TCP（这条走防抖路径）
+            var tcpResume = echo.TcpCount;
+            ((LinkRow)rows[0]!).Tcp = true;
+            Check("重新勾选 TCP 后恢复发送", PumpUntil(() => echo.TcpCount > tcpResume),
+                $"{tcpResume} → {echo.TcpCount}");
+
+            // ---- ③ 运行中由注册中心同步下来的新链路，立刻进入探测集合（无需重启测试） ----
+            ApplySnapshot(window, new List<NodeSnapshot>
+            {
+                new() { NodeId = "peer-new", Name = "新机房", Ip = "203.0.113.250", Port = 50099, Tcp = true, Udp = true }
+            });
+
+            Check("运行中同步到的新链路立刻进入探测集合（无需重启测试）",
+                PumpUntil(() => ((LinkConfig[])GetPrivateField(window, "_liveLinks")!)
+                    .Any(l => l.NodeId == "peer-new" && l.Host == "203.0.113.250" && l.Port == 50099)),
+                string.Join(" / ", ((LinkConfig[])GetPrivateField(window, "_liveLinks")!)
+                    .Select(l => $"{l.Name}@{l.Host}:{l.Port}")));
+
+            InvokePrivateHandler(window, "Stop_Click");
+            window.Close();
+        }, "运行中改链路断言");
+
+        ConfigManager.OverridePath = previousOverride;
+        try { Directory.Delete(root, true); } catch { }
+    }
+
+    /// <summary>
+    /// 能数入站探测次数的纯回显服务端（等价老版本被动端：读到什么回什么，不追加任何信息）。
+    /// 用它才能回答"界面说没发 TCP，实际上到底有没有 TCP 包出去"。
+    /// </summary>
+    private sealed class CountingEchoServer : IDisposable
+    {
+        private readonly TcpListener _tcp;
+        private readonly UdpClient _udp;
+        private readonly CancellationTokenSource _cts = new();
+        private int _tcpCount;
+        private int _udpCount;
+
+        public CountingEchoServer(int port)
+        {
+            _tcp = new TcpListener(IPAddress.Loopback, port);
+            _udp = new UdpClient(new IPEndPoint(IPAddress.Loopback, port));
+        }
+
+        public int TcpCount => Volatile.Read(ref _tcpCount);
+        public int UdpCount => Volatile.Read(ref _udpCount);
+
+        public void Start()
+        {
+            _tcp.Start();
+            _ = Task.Run(TcpLoopAsync);
+            _ = Task.Run(UdpLoopAsync);
+        }
+
+        private async Task TcpLoopAsync()
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                try
+                {
+                    using var accepted = await _tcp.AcceptTcpClientAsync(_cts.Token);
+                    using var stream = accepted.GetStream();
+
+                    var buffer = new byte[4096];
+                    var n = await stream.ReadAsync(buffer, _cts.Token);
+                    if (n <= 0) continue;
+
+                    Interlocked.Increment(ref _tcpCount);
+                    await stream.WriteAsync(buffer.AsMemory(0, n), _cts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                catch
+                {
+                    // 客户端中途关闭等：继续下一轮
+                }
+            }
+        }
+
+        private async Task UdpLoopAsync()
+        {
+            while (!_cts.IsCancellationRequested)
+            {
+                try
+                {
+                    var query = await _udp.ReceiveAsync(_cts.Token);
+                    Interlocked.Increment(ref _udpCount);
+                    await _udp.SendAsync(query.Buffer, query.RemoteEndPoint, _cts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                catch
+                {
+                    // 同上
+                }
+            }
+        }
+
+        public void Dispose()
+        {
+            try { _cts.Cancel(); } catch { }
+            try { _tcp.Stop(); } catch { }
+            try { _udp.Dispose(); } catch { }
+            try { _cts.Dispose(); } catch { }
+        }
     }
 
     // ---------------- 验收 A3 / A12 ----------------
@@ -1044,6 +1426,67 @@ internal static partial class Program
             server.Dispose();
             try { Directory.Delete(root, true); } catch { }
         }
+    }
+
+    // ---------------- IPv4 输入控件 ----------------
+
+    /// <summary>
+    /// 现场根因：地址框与端口框长得一样，IP 被敲进了端口框。
+    /// 现在地址是"四段数字 + 固定圆点"的标准 IPv4 样式，端口只收数字——两边都不该再填错。
+    /// </summary>
+    private static void TestIpv4Box()
+    {
+        Section("IPv4 输入控件：四段式 / 主机名回退 / 越界标红");
+
+        RunOnSta(() =>
+        {
+            var box = new Ipv4Box();
+
+            box.Text = "203.0.113.9";
+            Eq("IPv4 往返", "203.0.113.9", box.Text);
+            Eq("IPv4 模式下第一段", "203", ((TextBox)box.FindName("Octet1")!).Text);
+            Eq("IPv4 模式下末段", "9", ((TextBox)box.FindName("Octet4")!).Text);
+            Check("四段齐全判定为完整 IPv4", box.IsCompleteIpv4);
+            Check("默认不是主机名模式", !box.IsHostMode);
+
+            box.Text = "";
+            Eq("清空后回到 IPv4 模式且内容为空", ("", false), (box.Text, box.IsHostMode));
+
+            box.Text = "vpn.example.com";
+            Eq("域名自动切到主机名模式并保留原文", "vpn.example.com", box.Text);
+            Check("主机名模式下 IsHostMode 为真", box.IsHostMode);
+            Check("主机名模式不算完整 IPv4", !box.IsCompleteIpv4);
+
+            box.Text = "127.0.0.1";
+            Check("切回 IPv4 模式", !box.IsHostMode);
+            Eq("切回后内容正确", "127.0.0.1", box.Text);
+
+            // 只填了一半：必须能原样读回来（外层校验据此报"不是合法的 IPv4 地址"）
+            box.Text = "203.0.113";
+            Check("不完整的地址不会被当成 IPv4 铺进四段", box.IsHostMode || box.Text != "203.0.113.0",
+                box.Text);
+            Check("不完整地址判定为不完整", !box.IsCompleteIpv4, box.Text);
+
+            // 越界的段要标红（999 不是合法段）
+            box.Text = "";
+            ((TextBox)box.FindName("Octet1")!).Text = "999";
+            var border = ((TextBox)box.FindName("Octet1")!).BorderBrush as SolidColorBrush;
+            Check("越界的段标红", border?.Color == Color.FromRgb(0xC5, 0x22, 0x1F),
+                border?.Color.ToString() ?? "null");
+
+            ((TextBox)box.FindName("Octet1")!).Text = "203";
+            border = ((TextBox)box.FindName("Octet1")!).BorderBrush as SolidColorBrush;
+            Check("合法的段恢复正常颜色", border?.Color == Color.FromRgb(0xDA, 0xDC, 0xE0),
+                border?.Color.ToString() ?? "null");
+
+            // 解析规则本身
+            Check("TryParseOctets 接受合法地址", Ipv4Box.TryParseOctets("203.0.113.9", out var parts) && parts[1] == "0");
+            Check("TryParseOctets 拒绝三段", !Ipv4Box.TryParseOctets("203.0.113", out _));
+            Check("TryParseOctets 拒绝越界段", !Ipv4Box.TryParseOctets("203.0.113.999", out _));
+            Check("TryParseOctets 拒绝域名", !Ipv4Box.TryParseOctets("vpn.example.com", out _));
+            Check("TryParseOctets 拒绝全角数字", !Ipv4Box.TryParseOctets("２０３.0.113.9", out _));
+            Check("TryParseOctets 拒绝空段", !Ipv4Box.TryParseOctets("203..113.9", out _));
+        }, "IPv4 控件断言");
     }
 
     // ---------------- 兼容矩阵逐行验证 ----------------
@@ -1201,6 +1644,26 @@ internal static partial class Program
     }
 
     // ---------------- STA 辅助 ----------------
+
+    /// <summary>
+    /// 一边跑消息泵一边等条件成立（上限 timeoutMs）。
+    ///
+    /// 为什么不用固定 Pump(N)：界面链路是"500ms 定时器 + 1 秒防抖"，
+    /// 固定睡眠在机器忙的时候可能一次 tick 都赶不上——实测偶发失败过一次。
+    /// 这里等的是"最终会成立"，上限远大于防抖窗口，既不脆也不放水。
+    /// </summary>
+    private static bool PumpUntil(Func<bool> condition, int timeoutMs = 6000)
+    {
+        var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
+
+        while (DateTime.UtcNow < deadline)
+        {
+            if (condition()) return true;
+            Pump(100);
+        }
+
+        return condition();
+    }
 
     private static void RunOnSta(Action action, string label, int timeoutSeconds = 90)
     {

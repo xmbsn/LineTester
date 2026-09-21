@@ -1,6 +1,7 @@
 <UserControl x:Class="LineTester.Views.RegistryPanel"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:views="clr-namespace:LineTester.Views"
              FontFamily="Microsoft YaHei UI, Segoe UI" FontSize="13">
 
     <!--
@@ -101,7 +102,7 @@
                                   ToolTip="不勾选时与升级前行为完全一致：不发注册消息，也不接受注册消息"/>
                         <CheckBox x:Name="DistributableCheck" Style="{StaticResource RegCheck}"
                                   Content="参与网状（允许本节点被分发给其他节点）"
-                                  ToolTip="关闭后：其他节点上不会出现本机链路，本机仍可正常测试别人"/>
+                                  ToolTip="关闭后：其他节点上不会出现本机链路，本机仍可正常测试别人（此时「本端外网地址/端口」可以留空）"/>
                     </WrapPanel>
 
                     <Grid Margin="0,4,0,0">
@@ -121,14 +122,14 @@
                                    MaxWidth="240" HorizontalAlignment="Left"
                                    ToolTip="其他节点上自动生成的链路名就是它"/>
                         <TextBlock Grid.Row="0" Grid.Column="2" Style="{StaticResource RegLabel}" Text="本端外网地址"/>
-                        <TextBox   Grid.Row="0" Grid.Column="3" x:Name="PublicHostBox" Style="{StaticResource RegBox}"
-                                   MaxWidth="240" HorizontalAlignment="Left" Margin="0,0,0,8"
-                                   ToolTip="其他节点要靠这个地址找到本机；必须手工填写"/>
+                        <views:Ipv4Box  Grid.Row="0" Grid.Column="3" x:Name="PublicHostBox"
+                                        HorizontalAlignment="Left" Margin="0,0,0,8"
+                                        ToolTip="其他节点连本机时用的 IPv4 地址（机房映射进来的那个）。必须手工填写"/>
 
                         <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource RegLabel}" Text="本端外网端口"/>
                         <TextBox   Grid.Row="1" Grid.Column="1" x:Name="PublicPortBox" Style="{StaticResource RegBox}"
                                    Width="90" HorizontalAlignment="Left"
-                                   ToolTip="机房出口映射到本机的那个端口（通常等于监听端口）"/>
+                                   ToolTip="其他节点连本机时用的端口 = 机房映射到本机的那一个（通常与监听端口不同；它不是注册中心的端口）"/>
                         <TextBlock Grid.Row="1" Grid.Column="2" Style="{StaticResource RegLabel}" Text="节点身份"/>
                         <TextBlock Grid.Row="1" Grid.Column="3" x:Name="NodeIdText" TextWrapping="NoWrap"
                                    VerticalAlignment="Center" Foreground="#5F6368" FontFamily="Consolas, monospace"
@@ -136,7 +137,7 @@
                     </Grid>
 
                     <TextBlock Style="{StaticResource RegHint}"
-                               Text="外网地址必须手工填写：出方向 NAT 的源端口与入方向映射端口通常不同，程序无法从“中心看到的源地址”自动推断（那只是出方向的地址）。"/>
+                               Text="「本端外网地址 + 本端外网端口」= 其他节点连本机用的地址与端口（机房映射进来的那一个，例如 203.0.113.9:16298），必须手工填写：出方向 NAT 的源端口与入方向映射端口通常不同，程序无法从“中心看到的源地址”自动推断。它与「注册中心地址/端口」是两回事。若本机只想测别人、不需要被别人测，可取消勾选「参与网状」，这两项就可以留空。"/>
 
                     <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
                         <TextBlock Style="{StaticResource RegLabel}" Text="可被探测的协议"/>
@@ -168,12 +169,13 @@
                         </Grid.RowDefinitions>
 
                         <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource RegLabel}" Text="中心地址"/>
-                        <TextBox   Grid.Row="0" Grid.Column="1" x:Name="CenterHostBox" Style="{StaticResource RegBox}"
-                                   MaxWidth="240" HorizontalAlignment="Left"
-                                   ToolTip="中心与本机同机时可填 127.0.0.1"/>
+                        <views:Ipv4Box  Grid.Row="0" Grid.Column="1" x:Name="CenterHostBox"
+                                        HorizontalAlignment="Left"
+                                        ToolTip="注册中心映射出来的 IPv4 地址；中心与本机同机时可填 127.0.0.1；中心是域名时可点右侧“填主机名”"/>
                         <TextBlock Grid.Row="0" Grid.Column="2" Style="{StaticResource RegLabel}" Text="中心端口"/>
                         <TextBox   Grid.Row="0" Grid.Column="3" x:Name="CenterPortBox" Style="{StaticResource RegBox}"
-                                   Width="90" HorizontalAlignment="Left" Margin="0,0,0,8"/>
+                                   Width="90" HorizontalAlignment="Left" Margin="0,0,0,8"
+                                   ToolTip="注册中心映射出来的那个端口（例如机房把中心映射到 16298，这里就填 16298）；它不是本机自己的外网端口"/>
 
                         <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource RegLabel}" Text="预共享密钥"/>
                         <Grid Grid.Row="1" Grid.Column="1">
@@ -221,7 +223,7 @@
                               Content="本机同时承担注册中心角色（其他节点的注册中心地址填本机）"
                               ToolTip="中心与本测试端共用同一个监听端口，通过协议前缀区分注册消息与探测包"/>
                     <TextBlock Style="{StaticResource RegHint}"
-                               Text="中心地址填 127.0.0.1（本机回环）时，本节点只会注册到本机中心，且回环地址不会被分发给其他节点——适合中心兼测试端、但不希望别人测它的情况。"/>
+                               Text="「中心地址 + 中心端口」= 注册中心映射出来的地址与端口（例如 203.0.113.1:16298）。中心地址填 127.0.0.1（本机回环）时，本节点只会注册到本机中心，且回环地址不会被分发给其他节点——适合中心兼测试端、但不希望别人测它的情况。"/>
                 </StackPanel>
             </Border>
 

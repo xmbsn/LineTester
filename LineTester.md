@@ -7,7 +7,7 @@
 > 链路编辑器（含防误删）、界面重排、报文带对端源地址、失败原因分类、日志按天滚动 → 上传 GitHub（private）；
 > ② **链路注册协议 v1（多机房自动互测）** 全流程落地：规格 → 计划 → 三个切片（端口分流与中心服务、
 > 客户端同步循环与三节点端到端、注册设置页与中心节点管理 + 链路页联动），规格 §12 兼容矩阵逐行验证。
-> 自检从 **0 → 771 项断言**，全程 `0 警告 0 错误`。
+> 自检从 **0 → 837 项断言**，全程 `0 警告 0 错误`。
 
 ---
 
@@ -15,7 +15,7 @@
 
 > 读取 `E:\dsh\LineTester\LineTester.md`（本文件）与 `README.md`，然后：
 > ① `dotnet build .\LineTester.sln -c Release` 确认可编译（应为 0 警告 0 错误）；
-> ② `dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release` 跑自检（应 771/771 通过）；
+> ② `dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release` 跑自检（应 837/837 通过）；
 > ③ 改任何代码前先看本文件 **§4 关键设计约定** 与 **§5 本机环境坑**（这两节能避免重复踩坑）；
 > ④ 改注册协议/注册页前**先读 `docs/REGISTRY-PROTOCOL.md`**（协议契约的 SSOT，实现期修正已回写）。
 > 注意：**测试工程不在 .sln 里**（本机 SDK 损坏，见 §5.2），必须按路径构建/运行。
@@ -25,7 +25,7 @@
 - .NET 8 WPF 桌面工具：**主动探测 + 被动应答一体**，两端互相探测对方的监听端口；输出实时统计与按天滚动的 CSV 日志。
 - 所有运行参数在**程序目录**的 `appsettings.json`；界面只是可视化入口（含链路编辑器与注册中心页）。
 - **可选的多机房自动互测**（注册中心）：每个节点只填“自己 + 中心”，链路自动生成/删除；不启用时行为与升级前完全一致。
-- 当前 **19 个源文件 + 1 个测试工程**，零 NuGet 依赖。
+- 当前 **20 个源文件 + 1 个测试工程**，零 NuGet 依赖。
 
 ---
 
@@ -57,7 +57,8 @@
 | `src/Registry/RegistryUiText.cs` | 注册相关文案（连接状态/地址核对/分发状态/节点状态）——**不引用 WPF** |
 | `src/Views/RegistryPanel.xaml(.cs)` | 「注册中心」标签页（本节点/注册中心/状态/中心管理四区） |
 | `src/Views/RegistryNodeRow.cs` | 中心节点表的一行（分发勾选写中心侧 `centerHidden`）——**不引用 WPF** |
-| `tests/LineTester.Tests/Program*.cs` | 零依赖自检宿主（771 项断言，含真实回环网络、真实窗口端到端、注册协议与注册页） |
+| `src/Views/Ipv4Box.xaml(.cs)` | 标准 IPv4 输入控件（四段式、只收数字、自动跳段、越界标红、可切主机名） |
+| `tests/LineTester.Tests/Program*.cs` | 零依赖自检宿主（837 项断言，含真实回环网络、真实窗口端到端、注册协议与注册页） |
 
 ---
 
@@ -174,8 +175,14 @@ dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release
 - 表格统一在 `Window.Resources` 里的隐式 `DataGrid`/`DataGridColumnHeader`/`DataGridRow` 样式；**隔行底纹用行样式触发器**实现（用 `AlternatingRowBackground` 会盖掉"非法行标红"）；链路页的行样式里"注册链路配色"触发器必须放在"非法标红"**之前**（后面的赢）。
 - 按钮样式：`BaseButton`（键控）+ **隐式 `Style TargetType="Button"`** + `PrimaryButton`。曾经因为只定义了键控样式，导致除主按钮外全部退回 WPF 默认外观。
 - 状态栏四段：`StatusDot` / `StatusText` / `StatusParams` / `StatusSamples` + 独立的 `StatusNote`（测试/日志出错变红，注册告警变橙）。
-- 链路改动是**配置类**变更，需点「启动测试」生效（页脚会提示"运行中的测试仍在使用启动时的链路"）；**协议勾选是唯一即时生效的开关**。
-- **注册链路是例外**：探测循环每轮读 `_liveLinks` 快照，中心同步下来的链路当场开始探测、被删的链路当场消失。
+- 链路改动是**配置类**变更，但**运行中即时生效**：协议勾选（TCP/UDP）立刻作用到运行中的探测循环，
+  主机/端口/名称改动约 1 秒防抖后生效（防抖是为了不在"端口输到一半"时发包）。
+  曾经的口径是"点启动测试后生效"，结果现场出现"界面写着不发包、包却照发"，统计跟着失真。
+- **输入控件按语义分开**（现场根因）：地址是标准 IPv4 四段式（`Ipv4Box`，只收数字、自动跳段、
+  粘贴整段可自动铺开、越界段标红，域名可切到主机名框），端口/周期只收半角数字。
+  起因是地址框与端口框长得一样，运维把 IP 敲进了端口框，得到"外端端口必须是 1~65535"这种看不懂的报错。
+- **静态画刷必须 Freeze()**：自检里每个界面用例都在新的 STA 线程上跑，未冻结的静态 `Freezable`
+  属于创建它的线程 → 第二次使用就抛"调用线程无法访问此对象"（实测踩过，`Ipv4Box`/`RegistryPanel` 都已冻结）。
 - `RegistryPanel` 是**独立解析的 UserControl**：`Window.Resources` 的隐式样式**不会**作用到它的子元素
   （隐式样式在元素初始化时解析，那一刻它还没挂到窗口树上），因此它在自己的 `UserControl.Resources` 里
   复制了几个同名样式键（`RegCard`/`RegLabel`/`RegBox`/`RegCheck`/`RegButton`）。
@@ -270,8 +277,13 @@ git -c http.sslBackend=openssl -c http.proxy=http://127.0.0.1:17895 -c https.pro
 ## 8. 本次会话的验证证据
 
 - `dotnet build .\LineTester.sln -c Release` → **0 警告 0 错误**（每次改动后均重跑）
-- 自检 **771/771 通过**；每个切片后都跑过连跑批次（切片 3 后 5 次、T14 后 10 次与 6 次），全部 `exit=0`
-- 验收 A1–A13 逐条有用例（规格 §13.1「验收 → 证据映射」）；A3/A12 在 T14 补了显式用例
+- 自检 **837/837 通过**；T14 后 8 次连跑全绿，收尾阶段每改一轮都重跑
+- 现场反馈的三件事都有实测断言（不是靠肉眼看界面）：
+  ① 运行中取消勾选 TCP → 用"能数包的纯回显服务端"确认对端**不再收到新的 TCP**，而 UDP 照常；
+  ② "发 TCP 却显示 UDP" → 用"只开 TCP / 只开 UDP"两段实测：只开 TCP 时明细里全是 TCP 行、
+     对端一个 UDP 都收不到（反向同理）。明细的协议标注与真实发包一致，可复现的成因是①；
+  ③ 地址/端口输入 → `Ipv4Box` 四段式 + 端口/周期只收数字，配置层同时校验地址格式
+     （"203.0.113" 这种少一段的会被拦下，`.NET` 的 `IPAddress.TryParse` 会把它当 203.0.0.113 放行，已避开）
 - 发布：`dotnet publish … -r win-x64 --self-contained … -o .\publish` → `publish\LineTester.exe`（约 162 MB，含新模板 `appsettings.json`）
 - 渲染 + 排版审查通过：非法行确实标红、校验列给出原因、静态区域无文本裁剪/越界、**注册页在真实窗口里无横向裁剪**
 - 兼容矩阵逐行证据（见 §7 第一条）；注册三节点端到端（同进程 3 个真实 `ProbeServer`）覆盖自动生成链路、中心删除传播、离线重连后消失、中心不可达不影响探测

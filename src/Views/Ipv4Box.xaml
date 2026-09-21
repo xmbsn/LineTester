@@ -1,0 +1,85 @@
+<UserControl x:Class="LineTester.Views.Ipv4Box"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             FontFamily="Microsoft YaHei UI, Segoe UI" FontSize="13">
+
+    <!--
+        「标准的 IPv4 输入样式」：四段数字 + 固定的小圆点，与端口框一眼能分清。
+        端口框是窄的纯数字框，IP 框是四段式——现场把 IP 敲进端口框、或把端口敲进 IP 框都不可能了
+        （端口框连 '.' 都输不进去，IP 段最多 3 位数字）。
+    -->
+    <UserControl.Resources>
+        <Style x:Key="OctetStyle" TargetType="TextBox">
+            <Setter Property="Width" Value="42"/>
+            <Setter Property="Height" Value="26"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="TextAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="BorderBrush" Value="#DADCE0"/>
+            <Setter Property="FontFamily" Value="Consolas, monospace"/>
+            <Setter Property="MaxLength" Value="3"/>
+        </Style>
+
+        <Style x:Key="DotStyle" TargetType="TextBlock">
+            <Setter Property="Text" Value="."/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="2,0"/>
+            <Setter Property="Foreground" Value="#5F6368"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+        </Style>
+
+        <Style x:Key="ModeLink" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Foreground" Value="#1A73E8"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Padding" Value="6,2"/>
+            <Setter Property="Margin" Value="6,0,0,0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="Transparent">
+                            <TextBlock x:Name="Txt" Text="{TemplateBinding Content}"
+                                       Foreground="{TemplateBinding Foreground}"
+                                       TextDecorations="Underline"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Txt" Property="Foreground" Value="#1666CC"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </UserControl.Resources>
+
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- IPv4 模式（默认） -->
+        <StackPanel x:Name="Ipv4Panel" Grid.Column="0" Orientation="Horizontal">
+            <TextBox x:Name="Octet1" Style="{StaticResource OctetStyle}"/>
+            <TextBlock Style="{StaticResource DotStyle}"/>
+            <TextBox x:Name="Octet2" Style="{StaticResource OctetStyle}"/>
+            <TextBlock Style="{StaticResource DotStyle}"/>
+            <TextBox x:Name="Octet3" Style="{StaticResource OctetStyle}"/>
+            <TextBlock Style="{StaticResource DotStyle}"/>
+            <TextBox x:Name="Octet4" Style="{StaticResource OctetStyle}"/>
+        </StackPanel>
+
+        <!-- 主机名模式（配置里手写了域名，或用户主动切过来） -->
+        <TextBox x:Name="HostBox" Grid.Column="0" Width="200" Height="26" Padding="6,0"
+                 VerticalContentAlignment="Center" BorderBrush="#DADCE0"
+                 Visibility="Collapsed"
+                 ToolTip="主机名/域名（例如 vpn.example.com）"/>
+
+        <Button x:Name="ModeButton" Grid.Column="2" Style="{StaticResource ModeLink}"
+                Content="填主机名" Click="ModeButton_Click"
+                ToolTip="本端外网地址一般填 IPv4（例如 203.0.113.9）；中心地址是域名时可切到主机名"/>
+    </Grid>
+</UserControl>

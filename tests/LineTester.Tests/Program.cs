@@ -58,8 +58,10 @@ internal static partial class Program
             TestRegistrarDraft();
             TestRegistryUiText();
             TestRegistryNodeRow();
+            TestIpv4Box();
             TestRegistryPanelUi();
             TestRegistryMainWindowUi();
+            TestLinkToggleWhileRunning();
             await TestRegistryCompatMatrixAsync();
             TestRepoTemplateLoads();
             await TestProbesAsync();
@@ -286,7 +288,7 @@ internal static partial class Program
             var fresh = ConfigManager.Load(out var loadError);
             Check("首次加载无错误", loadError is null, loadError);
             Check("自动创建配置文件", File.Exists(path));
-            Eq("默认监听端口", 9000, fresh.ListenPort);
+            Eq("默认监听端口", 8800, fresh.ListenPort);
             Eq("新增字段默认丢包率阈值", 1.0, fresh.LossWarnPercent);
             Eq("新增字段默认连续丢包阈值", 3, fresh.ConsecutiveLossWarn);
             Eq("新增字段默认勾选 TCP", true, fresh.EnableTcp);
@@ -404,11 +406,11 @@ internal static partial class Program
             Check("重试后配置内容已更新", File.ReadAllText(path).Contains("9200"));
             Check("重试后不残留 .tmp 文件", !File.Exists(path + ".tmp"));
 
-            var broken = "{ \"ListenPort\": 9000, ";
+            var broken = "{ \"ListenPort\": 9200, ";
             File.WriteAllText(path, broken, new UTF8Encoding(false));
             var onBroken = ConfigManager.Load(out var brokenError);
             Check("JSON 语法错误被报告", brokenError is not null);
-            Check("语法错误时返回默认值以便界面可用", onBroken.ListenPort == 9000);
+            Check("语法错误时返回默认值以便界面可用", onBroken.ListenPort == 8800);
             Eq("语法错误时不覆盖原文件", broken, File.ReadAllText(path));
 
             Check("监听端口越界被拒绝",
@@ -1669,7 +1671,11 @@ internal static partial class Program
         for (var attempt = 0; attempt < 300; attempt++)
         {
             var candidate = random.Next(20000, 60000);
-            if (CanBind(candidate)) return candidate;
+            if (!CanBind(candidate)) continue;
+
+            // 走到这里说明系统临时端口整段不可用；留一行记录，便于分辨"端口问题"与"代码问题"
+            Console.WriteLine($"  [INFO] 临时端口全部不可用，随机扫描到端口 {candidate}");
+            return candidate;
         }
 
         throw new InvalidOperationException("找不到可绑定的端口（50 个临时端口 + 300 个随机端口都不可用）");

@@ -145,7 +145,11 @@ public sealed class RegistryStore
                 "本节点已被注册中心移除，如需恢复请在注册中心侧恢复");
         }
 
-        if (!RegistryAddressRules.IsDistributable(message.Ip, out var errorCode, out var errorMessage))
+        // 地址检查只针对**会被分发出去**的节点：它没有可被访问的地址，别人就会去连错地址。
+        // 自报 Distributable=false 的节点（只想测别人、不需要被别人测）不会被分发，
+        // 因此允许地址留空或填回环——否则"纯客户端"根本注册不上，也就测不了别人。
+        if (message.Distributable &&
+            !RegistryAddressRules.IsDistributable(message.Ip, out var errorCode, out var errorMessage))
             return RegistryUpsertResult.Rejected(errorCode, errorMessage);
 
         var now = _clock();

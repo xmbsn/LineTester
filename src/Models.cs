@@ -5,7 +5,7 @@ namespace LineTester;
 
 public sealed class AppConfig
 {
-    public int ListenPort { get; set; } = 9000;
+    public int ListenPort { get; set; } = 8800;
     public int IntervalMs { get; set; } = 1000;
     public int TimeoutMs { get; set; } = 1000;
     public int WarningRttMs { get; set; } = 300;

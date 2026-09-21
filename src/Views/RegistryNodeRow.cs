@@ -49,7 +49,8 @@ public sealed class RegistryNodeRow : INotifyPropertyChanged
         => new(
             node.NodeId,
             string.IsNullOrWhiteSpace(node.Name) ? node.NodeId : node.Name,
-            $"{node.Ip}:{node.Port}",
+            // 不参与网状的节点地址本来就是空的：显示成"-"比 ":0" 诚实
+            string.IsNullOrWhiteSpace(node.Ip) ? "（未提供，不分发）" : $"{node.Ip}:{node.Port}",
             RegistryUiText.DescribeProtocols(node.Tcp, node.Udp),
             RegistryUiText.DescribeLastSeen(node.LastSeenUtc, nowUtc),
             node.Online, node.Distributable, node.Authenticated, node.DuplicateSuspected, node.CenterHidden, false,

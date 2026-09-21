@@ -663,7 +663,8 @@ internal static partial class Program
         {
             Check("A 注册成功", await nodeA.Client.RegisterNowAsync(), nodeA.Client.Status.LastError);
             Check("中心处理器没有抛异常", handlerError is null, handlerError?.ToString());
-            Check("协议消息被端口分流到中心服务", handled > 0, $"handled={handled}");
+            Check("协议消息被端口分流到中心服务", handled > 0,
+                $"centerPort={centerPort} 收到 {handled} 帧；中心 rev={store.Revision}，清单 {store.Nodes.Count} 个节点");
             Check("B 注册成功", await nodeB.Client.RegisterNowAsync(), nodeB.Client.Status.LastError);
             Eq("中心清单里有 2 个节点", 2, store.Nodes.Count);
 
