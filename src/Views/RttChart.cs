@@ -443,7 +443,7 @@ public sealed class RttChart : Control
             if (value > maxRtt) maxRtt = value;
         }
 
-        var scale = ChartMath.ComputeYScale(maxRtt, WarningMs);
+        var scale = ChartMath.ComputeYScale(maxRtt);
         double YOf(double value) => plot.Bottom - Math.Clamp(value / scale.Max, 0, 1) * plot.Height;
 
         // ---- 横向网格 + Y 轴刻度 ----
@@ -452,7 +452,7 @@ public sealed class RttChart : Control
             var y = Math.Round(YOf(tick)) + 0.5;
             dc.DrawLine(gridPen, new Point(plot.Left, y), new Point(plot.Right, y));
 
-            var text = Text(tick.ToString("0.#"), 10.5, Subtle);
+            var text = Text(ChartMath.FormatTick(tick, scale.Step), 10.5, Subtle);
             dc.DrawText(text, new Point(plot.Left - text.Width - 7, y - text.Height / 2));
         }
 
@@ -471,16 +471,26 @@ public sealed class RttChart : Control
         }
 
         // ---- 阈值虚线 ----
-        if (WarningMs > 0 && WarningMs <= scale.Max)
+        // Y 轴是纯数据自适应的，阈值可能落在刻度之上：那就不要画线（画了会误导），
+        // 只在右上角标一句"阈值在刻度之上"，这样"有没有超阈值"照样一眼能看到。
+        if (WarningMs > 0)
         {
-            var warnPen = new Pen(WarnBrush, 1) { DashStyle = new DashStyle(new double[] { 5, 4 }, 0) };
-            warnPen.Freeze();
+            if (WarningMs <= scale.Max)
+            {
+                var warnPen = new Pen(WarnBrush, 1) { DashStyle = new DashStyle(new double[] { 5, 4 }, 0) };
+                warnPen.Freeze();
 
-            var y = Math.Round(YOf(WarningMs)) + 0.5;
-            dc.DrawLine(warnPen, new Point(plot.Left, y), new Point(plot.Right, y));
+                var y = Math.Round(YOf(WarningMs)) + 0.5;
+                dc.DrawLine(warnPen, new Point(plot.Left, y), new Point(plot.Right, y));
 
-            var text = Text($"阈值 {WarningMs:0.#}ms", 10, WarnTextBrush);
-            dc.DrawText(text, new Point(plot.Right - text.Width - 4, y - text.Height - 2));
+                var text = Text($"阈值 {WarningMs:0.#}ms", 10, WarnTextBrush);
+                dc.DrawText(text, new Point(plot.Right - text.Width - 4, y - text.Height - 2));
+            }
+            else
+            {
+                var text = Text($"峰值未到阈值 {WarningMs:0.#}ms", 10, WarnTextBrush);
+                dc.DrawText(text, new Point(plot.Right - text.Width - 4, plot.Bottom - text.Height - 2));
+            }
         }
 
         // ---- 曲线 ----
@@ -641,7 +651,7 @@ public sealed class RttChart : Control
             if (value > maxRtt) maxRtt = value;
         }
 
-        var scale = ChartMath.ComputeYScale(maxRtt, WarningMs);
+        var scale = ChartMath.ComputeYScale(maxRtt);
         double YOf(double value) => plot.Bottom - Math.Clamp(value / scale.Max, 0, 1) * plot.Height;
 
         const double fontSize = 11;

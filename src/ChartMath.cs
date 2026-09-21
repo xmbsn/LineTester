@@ -106,20 +106,29 @@ public static class ChartMath
     }
 
     /// <summary>
-    /// 算 Y 轴范围。上界必须同时容下：可见范围内的最大 RTT、以及告警阈值
-    /// （阈值线被裁掉的话，"有没有超过阈值"这个最常看的信息就没了）。
+    /// 算 Y 轴范围：**只按当前可见数据的最大值**自适应。
+    ///
+    /// 曾经把告警阈值也并进来当上界，结果是"数据只有 20ms、轴顶却被 300ms 的阈值顶到 400ms"，
+    /// 曲线全挤在底部——现场看到的就是"纵坐标是个固定值"。阈值超出刻度时另有提示（见 RttChart），
+    /// **不能为了画阈值线而牺牲数据本身的可读性**。
     /// </summary>
-    public static YScale ComputeYScale(double visibleMaxMs, double warningMs, int targetTicks = 5)
+    public static YScale ComputeYScale(double visibleMaxMs, int targetTicks = 5)
     {
-        var top = Math.Max(visibleMaxMs, warningMs > 0 ? warningMs : 0);
-        if (top <= 0) top = 10;          // 全是丢包/没数据时给个固定高度，避免除零和贴地
-        top *= 1.15;                     // 顶部留白，曲线不贴边
+        var top = visibleMaxMs > 0 ? visibleMaxMs : 10;   // 全是丢包/没数据时给个固定高度，避免除零和贴地
+        top *= 1.15;                                      // 顶部留白，曲线不贴边
 
         var step = NiceStep(top / Math.Max(2, targetTicks - 1));
         var max = Math.Ceiling(top / step) * step;
         if (max <= 0) max = step;
         return new YScale(0, max, step);
     }
+
+    /// <summary>
+    /// 刻度标签的小数位跟着步长走：
+    /// 本机回环的 RTT 只有零点几毫秒，固定一位小数会出现两个一模一样的刻度标签。
+    /// </summary>
+    public static string FormatTick(double value, double step)
+        => value.ToString(step >= 1 ? "F0" : step >= 0.1 ? "F1" : "F2");
 
     /// <summary>取"好看"的步长：1/2/5 × 10^n。</summary>
     public static double NiceStep(double raw)

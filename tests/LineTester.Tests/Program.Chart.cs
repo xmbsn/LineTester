@@ -105,16 +105,27 @@ internal static partial class Program
     {
         Section("RTT 曲线：刻度 / 聚合 / 缩放 / 悬停吸附");
 
-        // ---- Y 轴 ----
-        var scale = ChartMath.ComputeYScale(0, 300);
+        // ---- Y 轴：只按可见数据的最大值自适应（不拿阈值/固定值当上界） ----
+        var scale = ChartMath.ComputeYScale(0);
         Check("没有数据时 Y 轴仍然给得出高度（不会除零）", scale.Max > 0 && scale.Step > 0, $"{scale.Max}/{scale.Step}");
-        Check("阈值必须落在 Y 轴范围内（否则看不到有没有超阈值）", scale.Max >= 300, scale.Max.ToString());
 
-        var big = ChartMath.ComputeYScale(1500, 300);
+        var big = ChartMath.ComputeYScale(1500);
         Check("Y 轴上界容得下可见范围最大值", big.Max >= 1500, big.Max.ToString());
         Check("Y 轴刻度是整数步长", big.Ticks().Count >= 3 && big.Ticks().All(v => Math.Abs(v % big.Step) < 1e-6),
             string.Join(",", big.Ticks()));
         Eq("Y 轴从 0 起（延迟看绝对量）", 0.0, big.Min);
+
+        // 现场反馈："纵坐标应该按实际数据最大值自动调整，不该是个固定值"
+        // （之前把 300ms 的告警阈值并进了上界，数据只有 20ms 时轴顶被顶到 400ms，曲线全挤在底部）
+        var small = ChartMath.ComputeYScale(23);
+        Check("数据小时 Y 轴跟着数据走（不会被告警阈值顶高）", small.Max <= 30, small.Max.ToString());
+        Check("Y 轴仍留出余量（曲线不贴顶）", small.Max >= 23, small.Max.ToString());
+
+        var subMs = ChartMath.ComputeYScale(0.6);
+        Check("亚毫秒的数据也能自适应（回环 RTT 就是零点几毫秒）", subMs.Max <= 1.0 && subMs.Max >= 0.6, subMs.Max.ToString());
+        Eq("步长 0.2 时刻度标签一位小数", "0.2", ChartMath.FormatTick(0.2, 0.2));
+        Eq("步长 0.05 时刻度标签两位小数（否则相邻刻度标签会一模一样）", "0.05", ChartMath.FormatTick(0.05, 0.05));
+        Eq("步长为整数时刻度标签不带小数", "500", ChartMath.FormatTick(500, 500));
 
         Eq("漂亮步长 1/2/5×10^n", 500.0, ChartMath.NiceStep(431.25));
 
@@ -301,34 +312,35 @@ internal static partial class Program
             const int width = 700;
             const int height = 320;
 
-            var chart = new RttChart { Width = width, Height = height, WarningMs = 150 };
-            chart.SetSeries(history.SelectedSeries);
-            chart.Refresh();
-            chart.Measure(new Size(width, height));
-            chart.Arrange(new Rect(0, 0, width, height));
-            chart.UpdateLayout();
+            byte[] Grab(RttChart target, out int stride)
+            {
+                target.Measure(new Size(width, height));
+                target.Arrange(new Rect(0, 0, width, height));
+                target.UpdateLayout();
 
-            var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
-            bitmap.Render(chart);
+                var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
+                bitmap.Render(target);
 
-            var stride = width * 4;
-            var pixels = new byte[stride * height];
-            bitmap.CopyPixels(pixels, stride, 0);
+                stride = width * 4;
+                var buffer = new byte[stride * height];
+                bitmap.CopyPixels(buffer, stride, 0);
+                return buffer;
+            }
 
-            int CountNear(Color target, int tolerance)
+            int CountNear(byte[] buffer, Color target, int tolerance)
             {
                 var count = 0;
-                for (var i = 0; i + 3 < pixels.Length; i += 4)
+                for (var i = 0; i + 3 < buffer.Length; i += 4)
                 {
-                    var alpha = pixels[i + 3];
+                    var alpha = buffer[i + 3];
                     if (alpha < 40) continue;
 
                     // RenderTargetBitmap 是**预乘 alpha**：先还原成原色再比。
                     // 不还原的话，抗锯齿的细线（1.4px 的曲线）像素会被整体拉暗，
                     // 看起来像"根本没画"——这条差点把我自己骗过去。
-                    var b = pixels[i] * 255 / alpha;
-                    var g = pixels[i + 1] * 255 / alpha;
-                    var r = pixels[i + 2] * 255 / alpha;
+                    var b = buffer[i] * 255 / alpha;
+                    var g = buffer[i + 1] * 255 / alpha;
+                    var r = buffer[i + 2] * 255 / alpha;
 
                     if (Math.Abs(r - target.R) <= tolerance &&
                         Math.Abs(g - target.G) <= tolerance &&
@@ -338,8 +350,14 @@ internal static partial class Program
                 return count;
             }
 
-            var first = CountNear(RttChart.SeriesColor(0), 20);
-            var second = CountNear(RttChart.SeriesColor(1), 20);
+            var chart = new RttChart { Width = width, Height = height, WarningMs = 150 };
+            chart.SetSeries(history.SelectedSeries);
+            chart.Refresh();
+
+            var pixels = Grab(chart, out _);
+
+            var first = CountNear(pixels, RttChart.SeriesColor(0), 20);
+            var second = CountNear(pixels, RttChart.SeriesColor(1), 20);
 
             // 曲线为空时先分清是"没数据"还是"没画"：这一步把聚合单独跑一遍
             var view = chart.ViewRange!.Value;
@@ -354,17 +372,56 @@ internal static partial class Program
             Check("第 1 条曲线画到了图上（按配色数得到像素）", first > 100, first + " 像素");
             Check("第 2 条曲线画到了图上（两条颜色不同，不会混成一条）", second > 100, second + " 像素");
 
-            var ticks = CountNear(Color.FromRgb(0x5F, 0x63, 0x68), 16);      // Y/X 轴刻度文字
+            var ticks = CountNear(pixels, Color.FromRgb(0x5F, 0x63, 0x68), 16);      // Y/X 轴刻度文字
             Check("坐标轴刻度文字画出来了", ticks > 200, ticks + " 像素");
 
-            var grid = CountNear(Color.FromRgb(0xEC, 0xEE, 0xF1), 3);
+            var grid = CountNear(pixels, Color.FromRgb(0xEC, 0xEE, 0xF1), 3);
             Check("网格线画出来了", grid > 500, grid + " 像素");
 
-            var warn = CountNear(Color.FromRgb(0xB0, 0x60, 0x10), 16);       // 阈值线旁边的标注
-            Check("阈值线与其标注画出来了", warn > 20, warn + " 像素");
+            var warn = CountNear(pixels, Color.FromRgb(0xB0, 0x60, 0x10), 16);       // 阈值标注
+            Check("阈值标注画出来了", warn > 20, warn + " 像素");
 
-            var loss = CountNear(Color.FromRgb(0xC5, 0x22, 0x1F), 20);       // 丢包空心红点
+            var loss = CountNear(pixels, Color.FromRgb(0xC5, 0x22, 0x1F), 20);       // 丢包空心红点
             Check("丢包标记画出来了（红点）", loss > 5, loss + " 像素");
+
+            // ---- Y 轴必须跟着数据走：这是现场反馈（"纵坐标不该是个固定值"）的渲染级回归 ----
+            // 单独一张图：只有一条峰值 23ms 的曲线、阈值设 150ms。
+            // 轴若被阈值/固定值顶高，曲线会被压成底部一条细带（约 30px）；
+            // 按数据自适应则占掉大半个绘图区（约 200px）。
+            var solo = new ChartHistory();
+            solo.Select("机房D|127.0.0.1|1|TCP", "机房D", "TCP", "127.0.0.1:1");
+            for (var i = 0; i < 40; i++)
+                solo.Add(ChartSampleResult("机房D", "127.0.0.1", 1, "TCP", t0.AddSeconds(i), 20 + rnd.NextDouble() * 3, false));
+
+            var soloChart = new RttChart { Width = width, Height = height, WarningMs = 150 };
+            soloChart.SetSeries(solo.SelectedSeries);
+            soloChart.Refresh();
+
+            var soloPixels = Grab(soloChart, out var soloStride);
+            var soloColor = RttChart.SeriesColor(0);
+
+            var top = int.MaxValue;
+            var bottom = int.MinValue;
+            for (var i = 0; i + 3 < soloPixels.Length; i += 4)
+            {
+                var alpha = soloPixels[i + 3];
+                if (alpha < 40) continue;
+                if (Math.Abs(soloPixels[i + 2] * 255 / alpha - soloColor.R) > 20) continue;
+                if (Math.Abs(soloPixels[i + 1] * 255 / alpha - soloColor.G) > 20) continue;
+                if (Math.Abs(soloPixels[i] * 255 / alpha - soloColor.B) > 20) continue;
+
+                var row = i / soloStride;
+                if (row < top) top = row;
+                if (row > bottom) bottom = row;
+            }
+
+            // 23ms 的数据在 0~30ms 的刻度上应该落在绘图区的**上半部分**；
+            // 若轴还按 150ms 阈值/固定值走（0~200ms），同样的数据会贴在底部约 30 像素处。
+            var spanned = bottom - top;
+            Check("Y 轴按实际数据自适应：23ms 的曲线落在绘图区上半部分（没被固定刻度压到底部）",
+                top < 153, $"曲线最高点在第 {top} 行（绘图区约第 15~292 行，中线 153）");
+            Check("曲线自身的波动也能看清（不是压成一条 1 像素的细线）",
+                spanned > 15, $"曲线纵向跨度 {spanned} 像素");
         }, "曲线渲染断言");
     }
 
