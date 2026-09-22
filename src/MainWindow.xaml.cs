@@ -246,7 +246,7 @@ public partial class MainWindow : Window
 
         _configLog.Section($"加载配置 {ConfigManager.ConfigPath}");
         if (error is not null) _configLog.Write($"  读取错误：{error}");
-        _configLog.Write($"  {_settings.Links.Count} 条链路，全局 TCP={_settings.EnableTcp} UDP={_settings.EnableUdp}，" +
+        _configLog.Write($"  {_settings.Links.Count} 条链路，全局 TCP={_settings.EnableTcp} UDP={_settings.EnableUdp} ICMP={_settings.EnableIcmp}，" +
                          $"注册 Enabled={_settings.Registrar.Enabled} ServeAsCenter={_settings.Registrar.ServeAsCenter} " +
                          $"节点名={_settings.Registrar.NodeName} 地址=[{string.Join(",", new[] { _settings.Registrar.PublicHost }.Concat(_settings.Registrar.PublicHosts ?? new List<string>()))}]");
         foreach (var link in _settings.Links) _configLog.Write($"  {DescribeLink(link)}");
@@ -258,9 +258,9 @@ public partial class MainWindow : Window
 
     /// <summary>链路的一行日志描述（来源/协议/本地意图都写全，排障时能直接比对）。</summary>
     private static string DescribeLink(LinkConfig link)
-        => $"链路「{link.Name}」{link.Host}:{link.Port} tcp={link.Tcp} udp={link.Udp} " +
+        => $"链路「{link.Name}」{link.Host}:{link.Port} tcp={link.Tcp} udp={link.Udp} icmp={link.Icmp} " +
            $"source={link.Source} nodeId={(link.NodeId.Length > 8 ? link.NodeId[..8] : link.NodeId)} " +
-           $"localDisabled={link.LocalDisabled} localTcpOff={link.LocalTcpOff} localUdpOff={link.LocalUdpOff}";
+           $"localDisabled={link.LocalDisabled} localTcpOff={link.LocalTcpOff} localUdpOff={link.LocalUdpOff} localIcmpOff={link.LocalIcmpOff}";
 
     private void ShowConfigError(string error)
     {
@@ -425,8 +425,15 @@ public partial class MainWindow : Window
                     continue;
                 }
 
+                if (row.Icmp && seen.TryGetValue(DuplicateKey(row, ProbeClient.ProtocolIcmp), out var firstIcmp))
+                {
+                    row.SetProblem($"与第 {firstIcmp + 1} 行的 ICMP 目标重复");
+                    continue;
+                }
+
                 if (row.Tcp) seen[DuplicateKey(row, "TCP")] = i;
                 if (row.Udp) seen[DuplicateKey(row, "UDP")] = i;
+                if (row.Icmp) seen[DuplicateKey(row, ProbeClient.ProtocolIcmp)] = i;
             }
         }
         finally
@@ -441,15 +448,22 @@ public partial class MainWindow : Window
         return _linkRows.All(r => r.IsValid);
     }
 
+    /// <summary>
+    /// 链路的"身份签名"，用来判断界面上有没有未保存/未生效的改动。
+    /// **必须带上所有协议开关**：漏了 Icmp 时，只改 ICMP 勾选不会被认为是改动
+    /// （"有未保存的修改"与"1 秒内生效"两条提示都不会出现）。
+    /// </summary>
     private static string DuplicateKey(LinkRow row, string protocol)
-        => $"{row.Name.Trim()}|{row.Host.Trim()}|{row.Port}|{protocol}";
+        => protocol == ProbeClient.ProtocolIcmp
+            ? $"{row.Name.Trim()}|{row.Host.Trim()}|ICMP"          // ping 的是主机，端口不参与
+            : $"{row.Name.Trim()}|{row.Host.Trim()}|{row.Port}|{protocol}";
 
     private string LinksSignature()
         => LinksSignatureOf(_linkRows.Select(r => r.ToConfig()));
 
     /// <summary>同一套签名口径，但直接作用于配置（注册同步自动落盘后用它比对"是否已保存"）。</summary>
     private static string LinksSignatureOf(IEnumerable<LinkConfig> links)
-        => string.Join(";", links.Select(l => $"{l.Name.Trim()}|{l.Host.Trim()}|{l.Port}|{l.Tcp}|{l.Udp}"));
+        => string.Join(";", links.Select(l => $"{l.Name.Trim()}|{l.Host.Trim()}|{l.Port}|{l.Tcp}|{l.Udp}|{l.Icmp}"));
 
     private string LinkProblems()
         => string.Join("\n", _linkRows
@@ -462,14 +476,14 @@ public partial class MainWindow : Window
         if (LinkSummary is null) return;
 
         var parts = new List<string> { $"共 {_linkRows.Count} 条链路" };
-        parts.Add($"配置中 TCP {_linkRows.Count(r => r.IsValid && r.Tcp)} / UDP {_linkRows.Count(r => r.IsValid && r.Udp)}");
+        parts.Add($"配置中 TCP {_linkRows.Count(r => r.IsValid && r.Tcp)} / UDP {_linkRows.Count(r => r.IsValid && r.Udp)} / ICMP {_linkRows.Count(r => r.IsValid && r.Icmp)}");
 
         var invalid = _linkRows.Count(r => !r.IsValid);
         if (invalid > 0) parts.Add($"⚠ {invalid} 条校验未通过，保存与启动都会被拒绝");
 
-        var disabled = _linkRows.Count(r => r.IsValid && !r.Tcp && !r.Udp);
+        var disabled = _linkRows.Count(r => r.IsValid && !r.AnyProtocol);
         if (disabled > 0)
-            parts.Add($"{disabled} 条不主动探测（TCP/UDP 都未勾选，对端可能是纯服务端）");
+            parts.Add($"{disabled} 条不主动探测（TCP/UDP/ICMP 都未勾选，对端可能是纯服务端）");
 
         var signature = LinksSignature();
         if (!string.Equals(signature, _savedLinksSignature, StringComparison.Ordinal))
@@ -481,9 +495,10 @@ public partial class MainWindow : Window
         // 全局与链路冲突时提示谁说了算
         var suppressed = _linkRows.Where(r => r.IsValid).SelectMany(r =>
         {
-            var list = new List<string>(2);
+            var list = new List<string>(3);
             if (!_liveTcp && r.Tcp) list.Add($"{r.Name.Trim()} 的 TCP");
             if (!_liveUdp && r.Udp) list.Add($"{r.Name.Trim()} 的 UDP");
+            if (!_liveIcmp && r.Icmp) list.Add($"{r.Name.Trim()} 的 ICMP");
             return list;
         }).ToList();
 
@@ -545,11 +560,15 @@ public partial class MainWindow : Window
     private void LinksGrid_BeginningEdit(object sender, DataGridBeginningEditEventArgs e)
     {
         if (e.Row.Item is not LinkRow { IsRegistry: true } row) return;
-        if (e.Column.Header is "TCP" or "UDP") return;
+
+        // 注册链路的名称/主机/端口由中心维护，但**本端要不要用某个协议**必须能改。
+        // 协议集合以 ProbeClient.Protocols 为唯一来源：这里以前手写的是 "TCP" or "UDP"，
+        // 加 ICMP 时漏了 → 注册链路上的 ICMP 勾选框点不动（现场："icmp 很少能勾上或取消"）。
+        if (e.Column.Header is string header && ProbeClient.Protocols.Contains(header)) return;
 
         e.Cancel = true;
         UpdateStatus($"「{row.Name}」来自注册中心：名称/主机/端口不能本地修改；" +
-                     "要本地停测，请把该行的 TCP 与 UDP 都取消勾选（同步不会覆盖这个意图）");
+                     "要本地停测某个协议，直接取消该协议的勾选即可（同步不会覆盖这个意图）");
     }
 
     private void SelectAndFocus(LinkRow row)
@@ -898,7 +917,7 @@ public partial class MainWindow : Window
                 {
                     _centerLog.Write($"  已有节点 {node.Name} [{node.NodeId[..Math.Min(8, node.NodeId.Length)]}] " +
                                      $"地址=[{string.Join(",", node.Ips.Count > 0 ? node.Ips : new List<string> { node.Ip })}] " +
-                                     $"port={node.Port} tcp={node.Tcp} udp={node.Udp} online={node.Online} lastSeen={node.LastSeenUtc:u}");
+                                     $"port={node.Port} tcp={node.Tcp} udp={node.Udp} icmp={node.Icmp} online={node.Online} lastSeen={node.LastSeenUtc:u}");
                 }
 
                 notes.Add($"本机同时是注册中心：清单 {store.Nodes.Count} 个节点");
@@ -1086,7 +1105,7 @@ public partial class MainWindow : Window
         return string.Join("|",
             r.NodeId, r.NodeName, r.PublicHost, r.PublicPort.ToString(),
             string.Join(",", r.PublicHosts ?? new List<string>()),
-            r.AdvertiseTcp.ToString(), r.AdvertiseUdp.ToString(), r.Distributable.ToString(),
+            r.AdvertiseTcp.ToString(), r.AdvertiseUdp.ToString(), r.AdvertiseIcmp.ToString(), r.Distributable.ToString(),
             r.CenterHost, r.CenterPort.ToString(), r.Secret,
             r.HeartbeatSeconds.ToString(), r.SyncSeconds.ToString(),
             r.RetryMs.ToString(), r.MaxRetries.ToString());

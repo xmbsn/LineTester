@@ -67,7 +67,7 @@ public sealed class RegistryNodeRow : INotifyPropertyChanged
             node.NodeId,
             string.IsNullOrWhiteSpace(node.Name) ? node.NodeId : node.Name,
             shown,
-            RegistryUiText.DescribeProtocols(node.Tcp, node.Udp),
+            RegistryUiText.DescribeProtocols(node.Tcp, node.Udp, node.Icmp),
             RegistryUiText.DescribeLastSeen(node.LastSeenUtc, nowUtc),
             node.Online, node.Distributable, node.Authenticated, node.DuplicateSuspected, node.CenterHidden, false,
             setCenterHidden,

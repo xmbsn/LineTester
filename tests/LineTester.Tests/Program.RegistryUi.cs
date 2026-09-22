@@ -423,10 +423,34 @@ internal static partial class Program
         Check("未填外网地址：标红",
             RegistryUiText.DescribeSelfDistribution(emptyHost) is { Warning: true });
 
-        Eq("协议文案：全开", "TCP + UDP", RegistryUiText.DescribeProtocols(true, true));
-        Eq("协议文案：仅 TCP", "仅 TCP", RegistryUiText.DescribeProtocols(true, false));
-        Eq("协议文案：仅 UDP", "仅 UDP", RegistryUiText.DescribeProtocols(false, true));
-        Eq("协议文案：都未勾选", "都未勾选", RegistryUiText.DescribeProtocols(false, false));
+        // 协议文案必须覆盖 ICMP：中心节点表的「协议」列曾经因为漏传 ICMP 而少显示一个协议
+        Eq("协议文案：全开", "TCP + UDP + ICMP", RegistryUiText.DescribeProtocols(true, true, true));
+        Eq("协议文案：仅 TCP", "仅 TCP", RegistryUiText.DescribeProtocols(true, false, false));
+        Eq("协议文案：仅 UDP", "仅 UDP", RegistryUiText.DescribeProtocols(false, true, false));
+        Eq("协议文案：仅 ICMP", "仅 ICMP", RegistryUiText.DescribeProtocols(false, false, true));
+        Eq("协议文案：TCP+UDP", "TCP + UDP", RegistryUiText.DescribeProtocols(true, true, false));
+        Eq("协议文案：都未勾选", "都未勾选", RegistryUiText.DescribeProtocols(false, false, false));
+
+        // 只宣告 ICMP 的节点不能被说成"协议都未勾选"
+        var icmpOnly = new RegistrarConfig
+        {
+            Enabled = true, PublicHost = "203.0.113.9", PublicPort = 16298,
+            AdvertiseTcp = false, AdvertiseUdp = false, AdvertiseIcmp = true
+        };
+        var icmpOnlyNote = RegistryUiText.DescribeSelfDistribution(icmpOnly);
+        Check("只宣告 ICMP 时状态说明包含 ICMP 且不报「都未勾选」",
+            icmpOnlyNote is not null && icmpOnlyNote.Text.Contains("ICMP") && !icmpOnlyNote.Text.Contains("都未勾选"),
+            icmpOnlyNote?.Text ?? "null");
+
+        var noneAdvertised = new RegistrarConfig
+        {
+            Enabled = true, PublicHost = "203.0.113.9", PublicPort = 16298,
+            AdvertiseTcp = false, AdvertiseUdp = false, AdvertiseIcmp = false
+        };
+        var noneNote = RegistryUiText.DescribeSelfDistribution(noneAdvertised);
+        Check("三个协议都不宣告时才提示「都未勾选」",
+            noneNote is not null && noneNote.Text.Contains("都未勾选"),
+            noneNote?.Text ?? "null");
 
         // ---- 节点状态与时间 ----
         Eq("节点状态：在线+分发+认证", "在线 · 分发中 · 已认证",

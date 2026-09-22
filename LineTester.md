@@ -7,7 +7,7 @@
 > 链路编辑器（含防误删）、界面重排、报文带对端源地址、失败原因分类、日志按天滚动 → 上传 GitHub（private）；
 > ② **链路注册协议 v1（多机房自动互测）** 全流程落地：规格 → 计划 → 三个切片（端口分流与中心服务、
 > 客户端同步循环与三节点端到端、注册设置页与中心节点管理 + 链路页联动），规格 §12 兼容矩阵逐行验证。
-> 自检从 **0 → 1359 项断言**，全程 `0 警告 0 错误`。
+> 自检从 **0 → 1384 项断言**，全程 `0 警告 0 错误`。
 
 ---
 
@@ -15,7 +15,7 @@
 
 > 读取 `E:\dsh\LineTester\LineTester.md`（本文件）与 `README.md`，然后：
 > ① `dotnet build .\LineTester.sln -c Release` 确认可编译（应为 0 警告 0 错误）；
-> ② `dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release` 跑自检（应 1359/1359 通过）；
+> ② `dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release` 跑自检（应 1384/1384 通过）；
 > ③ 改任何代码前先看本文件 **§4 关键设计约定** 与 **§5 本机环境坑**（这两节能避免重复踩坑）；
 > ④ 改注册协议/注册页前**先读 `docs/REGISTRY-PROTOCOL.md`**（协议契约的 SSOT，实现期修正已回写）。
 > 注意：**测试工程不在 .sln 里**（本机 SDK 损坏，见 §5.2），必须按路径构建/运行。
@@ -72,7 +72,7 @@
 | `src/ChartHistory.cs` | 曲线的会话历史（按「链路+协议」存整个会话的采样，不受明细表 2000 条上限约束） |
 | `src/ChartMath.cs` | 曲线的纯计算（时间/Y 轴刻度、像素列聚合、缩放锚点、悬停吸附）——**不引用 WPF，可自检** |
 | `src/ChartLogReader.cs` | 历史曲线的数据源：增量（尾部续读）解析 `logs` 里的 CSV，跨天/半行/坏行/被截断都自愈——**不引用 WPF，可自检** |
-| `tests/LineTester.Tests/Program*.cs` | 零依赖自检宿主（1359 项断言，含真实回环网络、真实窗口端到端、注册协议、注册页、运营商判定、ICMP、曲线） |
+| `tests/LineTester.Tests/Program*.cs` | 零依赖自检宿主（1384 项断言，含真实回环网络、真实窗口端到端、注册协议、注册页、运营商判定、ICMP、曲线） |
 
 ---
 
@@ -294,7 +294,7 @@ git -c http.sslBackend=openssl -c http.proxy=http://127.0.0.1:17895 -c https.pro
 ## 8. 本次会话的验证证据
 
 - `dotnet build .\LineTester.sln -c Release` → **0 警告 0 错误**（每次改动后均重跑）
-- 自检 **1359/1359 通过**；收尾阶段每改一轮都重跑，现场反馈修复后 8 次、顶部节点名后 3 次连跑全绿
+- 自检 **1384/1384 通过**；收尾阶段每改一轮都重跑，现场反馈修复后 8 次、顶部节点名后 3 次连跑全绿
 - 现场反馈的三件事都有实测断言（不是靠肉眼看界面）：
   ① 运行中取消勾选 TCP → 用"能数包的纯回显服务端"确认对端**不再收到新的 TCP**，而 UDP 照常；
   ② "发 TCP 却显示 UDP" → 用"只开 TCP / 只开 UDP"两段实测：只开 TCP 时明细里全是 TCP 行、
@@ -376,6 +376,30 @@ git -c http.sslBackend=openssl -c http.proxy=http://127.0.0.1:17895 -c https.pro
   并对跨天、半行（日志是边写边读的）、坏行、文件被截断都做了自愈处理。
   踩坑记录：自检数据里写死日期 → 跨零点后那行落在查询范围之外，所以测试里的时间戳一律由
   `DateTime.Now` 推导，不写死。
+  ⑭ **注册链路上的 ICMP 勾选框点不动**（现场反馈："TCP/UDP 勾选基本没问题，ICMP 很少能勾上或取消"）：
+  加 ICMP 时留下了一批**手写的"TCP/UDP"枚举**没同步，这次的直接受害者是
+  `LinksGrid_BeginningEdit` 里的白名单 `"TCP" or "UDP"`——注册中心来源的链路只允许改这两列，
+  ICMP 一进入编辑就被 `e.Cancel = true` 拒掉。**全仓审计后同类漏改共 7 处，已全部修掉**：
+
+  | 位置 | 漏改后果 |
+  | --- | --- |
+  | `LinksGrid_BeginningEdit` 白名单 | 注册链路的 ICMP 勾选被拒（本次现场问题） |
+  | `RevalidateLinks` 重复目标查重 | 只勾 ICMP 的重复目标不报错 |
+  | `LinksSignatureOf` 链路签名 | 只改 ICMP 不算"有未保存的修改/1 秒内生效" |
+  | `UpdateLinkSummary` 的"不主动探测"统计 | 只勾 ICMP 的行被误报成"不主动探测" |
+  | `UpdateLinkSummary` 的"被全局压住"提示 | 全局关 ICMP 时不提示 |
+  | `RegistryNodeRow` → `DescribeProtocols(node.Tcp, node.Udp)` | **中心节点表的「协议」列少显示 ICMP** |
+  | `RegistryUiText` 自检说明的"都未勾选"判定 | 只宣告 ICMP 的节点被误报成"协议都未勾选" |
+
+  还顺手补齐了只记 TCP/UDP 的诊断日志（配置日志、中心收发日志、注册配置签名）。
+
+  **从模式上消除**：① `DescribeProtocols` 的 `icmp` 参数去掉了默认值——之前正是
+  `= false` 让漏传的调用点照样编译通过（就是中心节点表那一处）；
+  ② 协议列白名单改以 `ProbeClient.Protocols` 为唯一来源；
+  ③ 自检加了**双向守护**：网格里每个勾选列都必须属于已知协议集合、协议集合里每个协议都必须有列，
+  并逐列断言"注册链路上可以进入编辑"——这条用例直接驱动真实的 `DataGridBeginningEdit` 事件
+  （以前的用例全在模型/接口层跑，事件处理器一行都没被覆盖，这正是它漏网的原因）。
+  另外 `LinkRow.AnyProtocol` 成为"是否主动探测"的唯一判据，禁止再手写 `!Tcp && !Udp`。
 - 收尾阶段被发现的**自检宿主自身缺陷**（不是产品缺陷）：`FindBindablePort()` 只试系统临时端口，
   Windows 顺序分配临时端口时若游标落进保留区间会连续失败 → 整轮自检以未处理异常崩掉（`exit=-532462766`）；
   已改为"临时端口失败后退回随机扫描"，并让 `Main` 捕获宿主异常统一按失败收场。

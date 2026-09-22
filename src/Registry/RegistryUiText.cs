@@ -111,7 +111,7 @@ public static class RegistryUiText
         var protocols = DescribeProtocols(config.AdvertiseTcp, config.AdvertiseUdp, config.AdvertiseIcmp);
         var target = $"{config.PublicHost.Trim()}:{config.PublicPort}";
 
-        if (!config.AdvertiseTcp && !config.AdvertiseUdp)
+        if (!config.AdvertiseTcp && !config.AdvertiseUdp && !config.AdvertiseIcmp)
         {
             return new StatusNote(
                 $"地址可分发（{target}），但「可被探测的协议」都未勾选：" +
@@ -121,7 +121,14 @@ public static class RegistryUiText
         return new StatusNote($"可被其他节点探测：{target}（{protocols}）", false);
     }
 
-    public static string DescribeProtocols(bool tcp, bool udp, bool icmp = false)
+    /// <summary>
+    /// 协议列表文案。
+    ///
+    /// <paramref name="icmp"/> **不给默认值**是有意的：之前给了 <c>= false</c>，
+    /// 于是漏传 ICMP 的调用点照样编译通过、界面上少显示一个协议（中心节点表的「协议」列就这么错过）。
+    /// 协议是必需信息，漏传就应该编译不过。
+    /// </summary>
+    public static string DescribeProtocols(bool tcp, bool udp, bool icmp)
     {
         var parts = new List<string>(3);
         if (tcp) parts.Add("TCP");

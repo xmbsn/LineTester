@@ -745,6 +745,176 @@ internal static partial class Program
         }
     }
 
+    // ---------------- ⑨ 链路配置：协议勾选（含注册链路） ----------------
+
+    /// <summary>
+    /// 现场反馈："链路配置里 TCP/UDP 勾选基本没问题，但 ICMP 很少能勾上或取消"。
+    ///
+    /// 真因：`LinksGrid_BeginningEdit` 里手写了白名单 <c>"TCP" or "UDP"</c>——
+    /// 注册中心来源的链路只允许改这两列，加 ICMP 时漏了，于是 ICMP 一进入编辑就被取消。
+    /// 现在白名单以 <see cref="ProbeClient.Protocols"/> 为唯一来源，并在这里做**双向**守护：
+    /// 网格里每个协议勾选列都必须被放行，协议集合里的每个协议都必须有对应的列。
+    /// </summary>
+    private static void TestLinkProtocolToggles()
+    {
+        Section("链路配置：注册链路的协议勾选（ICMP 也曾点不动）");
+
+        var root = Path.Combine(AppContext.BaseDirectory, ".testtmp", "linktoggle_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        var previousOverride = ConfigManager.OverridePath;
+        ConfigManager.OverridePath = Path.Combine(root, "appsettings.json");
+
+        ConfigManager.Save(new AppConfig
+        {
+            ListenPort = FindBindablePort(),
+            EnableIcmp = true,
+            Isp = new IspConfig { Enabled = false },
+            Links =
+            {
+                new LinkConfig { Name = "手册链路", Host = "127.0.0.1", Port = 9001, Tcp = true, Udp = true },
+                new LinkConfig
+                {
+                    Name = "注册链路", Host = "192.0.2.20", Port = 9002,
+                    Tcp = true, Udp = true, Icmp = true,
+                    Source = LinkSources.Registry, NodeId = "reg-node"
+                }
+            }
+        });
+
+        try
+        {
+            RunOnSta(() =>
+            {
+                var window = new MainWindow();
+
+                // 链路配置在「链路配置」页里，必须先切过去、跑一次布局，
+                // 行容器（DataGridRow）才会生成——否则拿不到容器，也就验证不了"能不能进入编辑"。
+                var tabs = (TabControl)window.FindName("MainTabs")!;
+                tabs.SelectedItem = window.FindName("LinkTab");
+                Pump(200);
+
+                var grid = (DataGrid)window.FindName("LinksGrid")!;
+
+                var content = (FrameworkElement)window.Content;
+                content.Measure(new Size(1360, 900));
+                content.Arrange(new Rect(0, 0, 1360, 900));
+                content.UpdateLayout();
+
+                var rows = (System.Collections.IList)GetPrivateField(window, "_linkRows")!;
+                var registryRow = rows.Cast<LinkRow>().First(r => r.IsRegistry);
+                var manualRow = rows.Cast<LinkRow>().First(r => !r.IsRegistry);
+
+                // 行容器要真实生成，才能构造 DataGridBeginningEditEventArgs
+                grid.ScrollIntoView(registryRow);
+                grid.UpdateLayout();
+                var container = grid.ItemContainerGenerator.ContainerFromItem(registryRow) as DataGridRow;
+                if (container is null)
+                {
+                    Check("注册链路的行容器已生成", false, "容器未生成，无法验证编辑放行");
+                    return;
+                }
+
+                bool CanEdit(DataGridColumn column, LinkRow row, DataGridRow rowContainer)
+                {
+                    var args = new DataGridBeginningEditEventArgs(column, rowContainer, new RoutedEventArgs());
+                    InvokePrivateHandlerWith(window, "LinksGrid_BeginningEdit", grid, args);
+                    return !args.Cancel;
+                }
+
+                var protocolColumns = grid.Columns.Where(c => c is DataGridCheckBoxColumn).ToList();
+                Check("网格里有协议勾选列", protocolColumns.Count >= 3, protocolColumns.Count.ToString());
+
+                // ① 双向守护：XAML 的协议列 与 ProbeClient.Protocols 必须一一对应
+                foreach (var column in protocolColumns)
+                {
+                    var header = column.Header?.ToString() ?? "";
+                    Check($"勾选列「{header}」属于已知协议集合", ProbeClient.Protocols.Contains(header),
+                        string.Join(",", ProbeClient.Protocols));
+                }
+
+                foreach (var protocol in ProbeClient.Protocols)
+                {
+                    Check($"协议 {protocol} 在网格里有对应的勾选列",
+                        protocolColumns.Any(c => Equals(c.Header, protocol)),
+                        string.Join(",", protocolColumns.Select(c => c.Header?.ToString())));
+                }
+
+                // ② 注册链路上的每一个协议列都必须能改（现场就是 ICMP 这一列被挡掉了）
+                foreach (var column in protocolColumns)
+                {
+                    var header = column.Header?.ToString() ?? "";
+                    Check($"注册链路上「{header}」勾选可以改", CanEdit(column, registryRow, container), header);
+                }
+
+                // ③ 名称/主机/端口在注册链路上仍然只读（这条不能被上面的放宽破坏）
+                var nameColumn = grid.Columns.First(c => Equals(c.Header, "名称"));
+                Check("注册链路上「名称」仍然不可改", !CanEdit(nameColumn, registryRow, container));
+
+                // ④ 手工链路任何列都能改
+                var manualContainer = grid.ItemContainerGenerator.ContainerFromItem(manualRow) as DataGridRow;
+                if (manualContainer is not null)
+                {
+                    Check("手工链路上「名称」可以改", CanEdit(nameColumn, manualRow, manualContainer));
+                }
+
+                // ⑤ 勾选真的落到模型与"生效"列上（不只是能进入编辑）
+                var icmpColumn = protocolColumns.First(c => Equals(c.Header, "ICMP"));
+                registryRow.Icmp = false;
+                Pump(50);
+                Eq("取消勾选 ICMP 后「生效」列不再包含 ICMP", false, registryRow.Effective.Contains("ICMP"));
+                registryRow.Icmp = true;
+                Pump(50);
+                Check("重新勾选后「生效」列恢复 ICMP", registryRow.Effective.Contains("ICMP"), registryRow.Effective);
+
+                // ⑥ 只勾 ICMP 的行不能被当成"不主动探测"
+                var onlyIcmp = new LinkRow { Name = "只有ICMP", Host = "192.0.2.30", PortText = "9000", Tcp = false, Udp = false, Icmp = true };
+                onlyIcmp.SetGlobalProtocols(true, true, true);
+                Check("只勾 ICMP 也算主动探测（AnyProtocol）", onlyIcmp.AnyProtocol);
+                Check("只勾 ICMP 时「生效」显示 ICMP", onlyIcmp.Effective == "ICMP", onlyIcmp.Effective);
+
+                Check("三个协议都不勾才算不主动探测",
+                    !new LinkRow { Tcp = false, Udp = false, Icmp = false }.AnyProtocol);
+
+                // ⑦ 重复目标：ICMP 也要查重，且 ping 的是主机 → 端口不同也算重复
+                var dupA = new LinkRow { Name = "同一机房", Host = "192.0.2.40", PortText = "9001", Tcp = false, Udp = false, Icmp = true };
+                var dupB = new LinkRow { Name = "同一机房", Host = "192.0.2.40", PortText = "9002", Tcp = false, Udp = false, Icmp = true };
+                var keyA = InvokePrivateStatic<string>(window, "DuplicateKey", dupA, ProbeClient.ProtocolIcmp);
+                var keyB = InvokePrivateStatic<string>(window, "DuplicateKey", dupB, ProbeClient.ProtocolIcmp);
+                Check("ICMP 的重复判据只看主机（端口不参与）", keyA == keyB, $"{keyA} vs {keyB}");
+
+                // TCP/UDP 仍然按 主机+端口 区分（同主机不同端口是两条不同的链路）
+                var tcpB = new LinkRow { Name = "同一机房", Host = "192.0.2.40", PortText = "9002", Tcp = true };
+                Check("TCP 的重复判据仍带端口",
+                    InvokePrivateStatic<string>(window, "DuplicateKey", dupA, "TCP") !=
+                    InvokePrivateStatic<string>(window, "DuplicateKey", tcpB, "TCP"));
+
+                // ⑧ 链路签名必须带上 Icmp（否则"只改 ICMP"不算改动）
+                var sigA = InvokePrivateStatic<string>(window, "LinksSignatureOf",
+                    new List<LinkConfig> { new() { Name = "x", Host = "h", Port = 1, Tcp = true, Udp = true, Icmp = true } });
+                var sigB = InvokePrivateStatic<string>(window, "LinksSignatureOf",
+                    new List<LinkConfig> { new() { Name = "x", Host = "h", Port = 1, Tcp = true, Udp = true, Icmp = false } });
+                Check("只改 ICMP 勾选也算链路改动（签名含 Icmp）", sigA != sigB, $"{sigA} vs {sigB}");
+
+                window.Close();
+            }, "链路协议勾选断言");
+        }
+        finally
+        {
+            ConfigManager.OverridePath = previousOverride;
+            try { Directory.Delete(root, true); } catch { }
+        }
+    }
+
+    /// <summary>调用窗口的私有静态方法（自检里验证纯逻辑用）。</summary>
+    private static T InvokePrivateStatic<T>(object window, string name, params object[] args)
+    {
+        var method = window.GetType().GetMethod(name,
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)
+            ?? throw new InvalidOperationException("未找到方法：" + name);
+        return (T)method.Invoke(null, args)!;
+    }
+
     // ---------------- ④ 真实窗口 ----------------
 
     private static void TestChartUi()

@@ -16,7 +16,7 @@ public sealed class RegistryClientOptions
     /// <summary>本端全部外网地址（含主地址）；多于一个时会随注册一起下发。</summary>
     public List<string> Ips { get; set; } = new();
 
-    /// <summary>对外宣告"可被探测的协议"（对应 AdvertiseTcp/AdvertiseUdp）。</summary>
+    /// <summary>对外宣告"可被探测的协议"（对应 AdvertiseTcp/AdvertiseUdp/AdvertiseIcmp）。</summary>
     public bool Tcp { get; set; } = true;
 
     public bool Udp { get; set; } = true;

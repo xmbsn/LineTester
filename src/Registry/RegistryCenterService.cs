@@ -135,7 +135,7 @@ public sealed class RegistryCenterService
         if (!result.Accepted)
         {
             _log?.Write($"REG 被拒 nodeId={Short(message.NodeId)} name={message.Name} 地址=[{string.Join(",", addresses)}] " +
-                        $"port={message.Port} tcp={message.Tcp} udp={message.Udp} → {result.ErrorCode}：{result.ErrorMessage}");
+                        $"port={message.Port} tcp={message.Tcp} udp={message.Udp} icmp={message.Icmp} → {result.ErrorCode}：{result.ErrorMessage}");
 
             return Reply(new ErrorMessage
             {
@@ -146,7 +146,7 @@ public sealed class RegistryCenterService
         }
 
         _log?.Write($"REG 成功 nodeId={Short(message.NodeId)} name={message.Name} " +
-                    $"地址=[{string.Join(",", addresses)}] port={message.Port} tcp={message.Tcp} udp={message.Udp} " +
+                    $"地址=[{string.Join(",", addresses)}] port={message.Port} tcp={message.Tcp} udp={message.Udp} icmp={message.Icmp} " +
                     $"distributable={message.Distributable} rev {beforeRevision}→{_store.Revision} 清单 {_store.Nodes.Count} 个节点" +
                     (message.Distributable && addresses.Count > 1 ? $"（多地址：会给每个地址各生成一条链路）" : ""));
 

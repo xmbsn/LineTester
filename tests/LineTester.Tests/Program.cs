@@ -109,6 +109,7 @@ internal static partial class Program
             await TestRegistryCompatMatrixAsync();
             TestRepoTemplateLoads();
             TestLinkConfigCloneIsComplete();
+            TestLinkProtocolToggles();
             TestSentCounterIsCumulative();
             TestChartHistory();
             await TestChartLogReaderAsync();

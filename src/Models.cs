@@ -18,8 +18,8 @@ public sealed class AppConfig
     public int ConsecutiveLossWarn { get; set; } = 3;
 
     /// <summary>
-    /// 全局协议开关：只有勾选的协议才会发出探测包（界面上的 TCP/UDP 勾选框）。
-    /// 与每条链路自身的 Tcp/Udp 是“与”关系：两者都开才会真正发包。
+    /// 全局协议开关：只有勾选的协议才会发出探测包（界面上的 TCP/UDP/ICMP 勾选框）。
+    /// 与每条链路自身的 Tcp/Udp/Icmp 是“与”关系：两者都开才会真正发包。
     /// </summary>
     public bool EnableTcp { get; set; } = true;
 
@@ -43,7 +43,7 @@ public sealed class AppConfig
     {
         Links =
         {
-            new LinkConfig { Name = "示例-机房B", Host = "127.0.0.1", Port = 9001, Tcp = true, Udp = true }
+            new LinkConfig { Name = "示例-机房B", Host = "127.0.0.1", Port = 9001, Tcp = true, Udp = true, Icmp = false }
         }
     };
 }
@@ -89,7 +89,7 @@ public static class LinkSources
 /// 链路注册配置（规格：docs/REGISTRY-PROTOCOL.md §4.1）。
 ///
 /// 分两组：本节点（我是谁、别人怎么测我）与注册中心（去哪儿注册）。
-/// <see cref="AdvertiseTcp"/>/<see cref="AdvertiseUdp"/> 与全局的 EnableTcp/EnableUdp
+/// <see cref="AdvertiseTcp"/>/<see cref="AdvertiseUdp"/>/<see cref="AdvertiseIcmp"/> 与全局的 EnableTcp/EnableUdp/EnableIcmp
 /// <b>语义不同</b>：前者是"允许别人怎么测我"，后者是"我主动发不发"。
 /// </summary>
 public sealed class RegistrarConfig
@@ -335,6 +335,15 @@ public sealed class LinkRow : INotifyPropertyChanged
         get => _icmp;
         set { if (Set(ref _icmp, value)) Raise(nameof(Effective)); }
     }
+
+    /// <summary>
+    /// 本行是否至少启用了一个协议。三个都关 = 这条链路只保留配置、不主动探测
+    /// （对端可能是纯服务端，或临时停测而不想删掉配置）。
+    ///
+    /// 判断"不主动探测"必须用它，不要手写 <c>!Tcp &amp;&amp; !Udp</c>——
+    /// 那样"只勾了 ICMP"的行会被误报成"不主动探测"。
+    /// </summary>
+    public bool AnyProtocol => Tcp || Udp || Icmp;
 
     /// <summary>
     /// 本行**实际会发出**的协议 = 界面上的全局协议勾选 ∩ 本行自己的勾选。
