@@ -15,6 +15,16 @@ public sealed class StatSession
     private readonly Dictionary<string, string> _lastSeenFrom = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _failure = new(StringComparer.Ordinal);
 
+    /// <summary>
+    /// 会话**累计**发包/丢包数（不随滑动窗口回落）。
+    ///
+    /// 曾经直接把"窗口内样本数"当发送数显示，于是 1 秒 1 个包、窗口 60 分钟时
+    /// 这一列永远停在 3600（现场看到的是 3599/3598 不动了，而包其实一直在发）。
+    /// 「发送/丢包」是计数器，必须是累计；「平均RTT / 分位」才是窗口口径。
+    /// </summary>
+    private readonly Dictionary<string, int> _sentTotal = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int> _lostTotal = new(StringComparer.Ordinal);
+
     public int WindowMinutes { get; private set; } = 60;
     public int WarningRttMs { get; private set; } = 300;
     public double LossWarnPercent { get; private set; } = 1.0;
@@ -53,6 +63,8 @@ public sealed class StatSession
         _consecutiveLoss.Clear();
         _lastSeenFrom.Clear();
         _failure.Clear();
+        _sentTotal.Clear();
+        _lostTotal.Clear();
         ClearedAt = DateTime.Now;
     }
 
@@ -73,6 +85,10 @@ public sealed class StatSession
         }
 
         list.Add(result);
+
+        // 累计计数：与滑动窗口无关，永远只增不减（「清除」时归零）
+        _sentTotal[key] = _sentTotal.GetValueOrDefault(key) + 1;
+        if (result.Lost) _lostTotal[key] = _lostTotal.GetValueOrDefault(key) + 1;
 
         var cutoff = result.Timestamp.AddMinutes(-WindowMinutes);
         list.RemoveAll(x => x.Timestamp < cutoff);
@@ -117,8 +133,15 @@ public sealed class StatSession
                 else if (s.RttMs.HasValue) valid.Add(s.RttMs.Value);
             }
 
-            var sent = samples.Count;
-            var lossRate = sent == 0 ? 0 : lost * 100.0 / sent;
+            var sent = samples.Count;                       // 窗口内（用于状态判定：故障要能恢复）
+            var windowLost = lost;
+            var windowLossRate = sent == 0 ? 0 : windowLost * 100.0 / sent;
+
+            // 表上显示的是**会话累计**计数器：发送/丢包/丢包率三者同一口径
+            var sentTotal = _sentTotal.GetValueOrDefault(key);
+            var lostTotal = _lostTotal.GetValueOrDefault(key);
+            var totalLossRate = sentTotal == 0 ? 0 : lostTotal * 100.0 / sentTotal;
+
             double? avg = valid.Count == 0 ? null : valid.Average();
             var consecutive = GetConsecutiveLoss(key);
 
@@ -133,14 +156,15 @@ public sealed class StatSession
                 P95 = Format(Statistics.Percentile(valid, 0.95)),
                 P99 = Format(Statistics.Percentile(valid, 0.99)),
                 Percentiles = DescribePercentiles(valid),
-                Sent = sent,
-                Lost = lost,
-                SentLost = $"{sent} / {lost}",
-                LossRate = $"{lossRate:F2}%",
+                Sent = sentTotal,
+                Lost = lostTotal,
+                SentLost = $"{sentTotal} / {lostTotal}",
+                LossRate = $"{totalLossRate:F2}%",
                 ConsecutiveLoss = consecutive,
                 SeenFrom = LastSeenFrom(key) is { Length: > 0 } seen ? seen : "-",
                 LastFailure = LastFailure(key) is { Length: > 0 } failure ? failure : "-",
-                Status = StatusRules.Compute(sent, lost, consecutive, avg,
+                // 状态是"当前是否异常"：用**窗口**口径，坏过一阵恢复后不该永远红着
+                Status = StatusRules.Compute(sent, windowLost, consecutive, avg,
                     WarningRttMs, LossWarnPercent, ConsecutiveLossWarn)
             });
         }

@@ -429,6 +429,322 @@ internal static partial class Program
         }, "曲线渲染断言");
     }
 
+    // ---------------- ⑥ 统计计数器：会话累计 ----------------
+
+    /// <summary>
+    /// 现场反馈："发送包数最大只到 3599 或 3598 就不再涨了，但实际还在发"。
+    /// 真因：那一列显示的是**滑动窗口内**的样本数（1 秒 1 个包 × 窗口 60 分钟 = 3600）。
+    /// 这条用 1 分钟的窗口喂 150 条样本，把旧行为（停在 60）与新行为（150）区分开。
+    /// </summary>
+    private static void TestSentCounterIsCumulative()
+    {
+        Section("统计：发送/丢包是会话累计（不再卡在窗口上限）");
+
+        var session = new StatSession();
+        session.Configure(new AppConfig
+        {
+            StatWindowMinutes = 1,
+            WarningRttMs = 300,
+            LossWarnPercent = 1.0,
+            ConsecutiveLossWarn = 3
+        });
+
+        var t0 = new DateTime(2026, 9, 21, 10, 0, 0);
+
+        for (var i = 0; i < 150; i++)
+        {
+            var lost = i % 50 == 0;      // 150 条里丢 3 条
+            session.Add(ChartSampleResult("机房B", "127.0.0.1", 9001, "TCP", t0.AddSeconds(i), 10 + i, lost));
+        }
+
+        var rows = session.BuildRows();
+        Eq("统计行存在", 1, rows.Count);
+
+        var row = rows[0];
+        Eq("发送数是会话累计（旧行为会停在窗口内的 60）", 150, row.Sent);
+        Eq("丢包数也是会话累计", 3, row.Lost);
+        Eq("「发送/丢包」显示累计值", "150 / 3", row.SentLost);
+        Eq("丢包率按累计算", "2.00%", row.LossRate);
+        Check("状态仍按窗口判定（故障要能恢复，不该被历史稀释）", row.Status.Length > 0, row.Status);
+
+        // 继续发 → 继续涨
+        for (var i = 150; i < 200; i++)
+            session.Add(ChartSampleResult("机房B", "127.0.0.1", 9001, "TCP", t0.AddSeconds(i), 12, false));
+
+        Eq("继续发包时计数继续增长", 200, session.BuildRows()[0].Sent);
+
+        // 「清除」才是归零点
+        session.Clear();
+        Check("清除后统计行消失（累计计数一并归零）", session.BuildRows().Count == 0);
+    }
+
+    // ---------------- ⑦ 历史日志读取 ----------------
+
+    private static async Task TestChartLogReaderAsync()
+    {
+        Section("RTT 曲线：从 logs 日志读历史（跨会话/跨重启）");
+
+        var root = Path.Combine(AppContext.BaseDirectory, ".testtmp", "chartlog_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            // 文件名规则必须与 CsvLogWriter 完全一致，否则历史永远是空的：这里用真实的写入器落盘再读回来
+            var logs = Path.Combine(root, "logs");
+            var yesterday = DateTime.Today.AddDays(-1);
+
+            using (var writer = new CsvLogWriter(logs))
+            {
+                for (var i = 0; i < 5; i++)
+                {
+                    writer.Enqueue(ChartSampleResult("机房B", "127.0.0.1", 9001, "TCP",
+                        yesterday.AddHours(10).AddSeconds(i), 20 + i, false));
+                }
+
+                writer.Enqueue(ChartSampleResult("机房B", "127.0.0.1", 9001, "UDP",
+                    yesterday.AddHours(10), 99, false));
+
+                await writer.WaitForIdleAsync(TimeSpan.FromSeconds(5));
+            }
+
+            var reader = new ChartLogReader(logs);
+            var key = "机房B|127.0.0.1|9001|TCP";
+
+            var split = ChartLogReader.SplitKey(key);
+            Check("曲线键能映射到日志文件与协议", split is not null);
+            Eq("文件名规则与日志写入器一致", "机房B_127.0.0.1_9001.csv", split!.Value.FileName);
+            Eq("协议取自键的末段", "TCP", split.Value.Protocol);
+
+            Check("列出的可用日期包含昨天", reader.AvailableDays().Contains(yesterday),
+                string.Join(",", reader.AvailableDays().Select(d => d.ToString("MM-dd"))));
+
+            var loaded = reader.Load(new[] { key }, yesterday, yesterday.AddDays(1));
+            Eq("读到昨天的 5 条 TCP 采样", 5, loaded[key].Count);
+            Eq("按协议过滤（UDP 那条不算进 TCP）", 20.0, loaded[key][0].RttMs);
+            Check("采样按时间有序", loaded[key].Select(s => s.Time).SequenceEqual(
+                Enumerable.Range(0, 5).Select(i => yesterday.AddHours(10).AddSeconds(i))));
+
+            var udp = reader.Load(new[] { "机房B|127.0.0.1|9001|UDP" }, yesterday, yesterday.AddDays(1));
+            Eq("同一条链路的另一个协议也读得到", 1, udp["机房B|127.0.0.1|9001|UDP"].Count);
+
+            // 时间范围过滤：只要前 2 秒
+            var window = reader.Load(new[] { key }, yesterday.AddHours(10), yesterday.AddHours(10).AddSeconds(1.5));
+            Eq("按时间范围过滤", 2, window[key].Count);
+
+            // 增量：日志又追加了内容 → 再读只补新增，不重复
+            File.AppendAllText(reader.PathFor(yesterday, split.Value.FileName),
+                CsvLogWriter.FormatRow(ChartSampleResult("机房B", "127.0.0.1", 9001, "TCP",
+                    yesterday.AddHours(10).AddSeconds(10), 42, false)) + Environment.NewLine);
+
+            var again = reader.Load(new[] { key }, yesterday, yesterday.AddDays(1));
+            Eq("追加后读到 6 条（增量读取，不重复）", 6, again[key].Count);
+            Eq("新增的就是那一行", 42.0, again[key][^1].RttMs);
+
+            // 半行安全：日志是边写边读的，末尾那行可能还没写完——不能吃掉它
+            // （日期必须由 yesterday 推出来，不能写死：写死的话跨零点跑就会落在查询范围之外）
+            var partialStamp = yesterday.AddHours(10).AddSeconds(11);
+            File.AppendAllText(reader.PathFor(yesterday, split.Value.FileName),
+                $"{partialStamp:yyyy-MM-dd HH:mm:ss.fff},127.0.0");
+            var halfWritten = reader.Load(new[] { key }, yesterday, yesterday.AddDays(1));
+            Eq("写到一半的行先不算", 6, halfWritten[key].Count);
+
+            File.AppendAllText(reader.PathFor(yesterday, split.Value.FileName), ".1,9001,TCP,7.000,0,1.000,9,pid,-," + Environment.NewLine);
+            var completed = reader.Load(new[] { key }, yesterday, yesterday.AddDays(1));
+            Check("补齐之后那一行被读到（没有丢）", completed[key].Count == 7,
+                $"实际 {completed[key].Count}，最后一条 RTT={completed[key][^1].RttMs}");
+
+            // 坏行不该让整份历史读不出来
+            File.AppendAllText(reader.PathFor(yesterday, split.Value.FileName),
+                "这不是一行日志" + Environment.NewLine + ",,,," + Environment.NewLine);
+            var withJunk = reader.Load(new[] { key }, yesterday, yesterday.AddDays(1));
+            Eq("坏行被跳过，好行照读", 7, withJunk[key].Count);
+
+            // 文件被清空/替换 → 缓存要自愈
+            File.WriteAllText(reader.PathFor(yesterday, split.Value.FileName), CsvLogWriter.Header + Environment.NewLine);
+            var truncated = reader.Load(new[] { key }, yesterday, yesterday.AddDays(1));
+            Eq("文件被截断后能自愈（不会读出旧数据）", 0, truncated[key].Count);
+
+            // 不存在的日期：返回空而不是抛异常
+            var missing = reader.Load(new[] { key }, yesterday.AddDays(-10), yesterday.AddDays(-9));
+            Eq("没有日志的日期返回空", 0, missing[key].Count);
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch { }
+        }
+    }
+
+    // ---------------- ⑧ 历史范围（真实窗口） ----------------
+
+    /// <summary>
+    /// 现场要求：**重启测试之后，RTT 曲线还能查看上一个会话的数据**；
+    /// 默认看最近 24 小时，也可以自己选日期。数据来自 logs 里的 CSV（逐包落盘的原始记录）。
+    /// </summary>
+    private static void TestChartHistoryUi()
+    {
+        Section("RTT 曲线：历史范围（默认最近 24 小时 / 可选日期 / 跨会话）");
+
+        var root = Path.Combine(AppContext.BaseDirectory, ".testtmp", "charthist_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        var previousOverride = ConfigManager.OverridePath;
+        ConfigManager.OverridePath = Path.Combine(root, "appsettings.json");
+
+        var echoServer = StartEchoServer(out var echoPort);
+        if (echoServer is null)
+        {
+            Check("回显服务启动", false, "找不到可绑定端口");
+            ConfigManager.OverridePath = previousOverride;
+            return;
+        }
+
+        // 造两份"上一个会话"的日志：
+        // ① 12 小时前（一定落在"最近 24 小时"里，用来验证 24 小时视图包含历史数据）
+        // ② 3 天前（用来验证"选日期"）
+        // 注意日期必须由 DateTime.Now 推出来：写死日期会在跨零点/跨时段跑时落到范围之外
+        var logs = Path.Combine(AppContext.BaseDirectory, "logs");
+        var recentTime = DateTime.Now.AddHours(-12);
+        var olderDay = DateTime.Today.AddDays(-3);
+
+        var historyFiles = new List<(string Path, bool DirectoryExisted)>
+        {
+            (Path.Combine(logs, CsvLogWriter.FolderNameFor(recentTime), $"本机_127.0.0.1_{echoPort}.csv"),
+                Directory.Exists(Path.Combine(logs, CsvLogWriter.FolderNameFor(recentTime)))),
+            (Path.Combine(logs, CsvLogWriter.FolderNameFor(olderDay), $"本机_127.0.0.1_{echoPort}.csv"),
+                Directory.Exists(Path.Combine(logs, CsvLogWriter.FolderNameFor(olderDay))))
+        };
+
+        void WriteFakeLog(string path, IReadOnlyList<DateTime> stamps, double baseRtt)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            var rows = new List<string> { CsvLogWriter.Header };
+            for (var i = 0; i < stamps.Count; i++)
+            {
+                rows.Add(CsvLogWriter.FormatRow(ChartSampleResult("本机", "127.0.0.1", echoPort, "TCP",
+                    stamps[i], baseRtt + i, false)));
+            }
+
+            File.WriteAllLines(path, rows);
+        }
+
+        WriteFakeLog(historyFiles[0].Path,
+            Enumerable.Range(0, 5).Select(i => recentTime.AddSeconds(i)).ToList(), 30);
+        WriteFakeLog(historyFiles[1].Path,
+            Enumerable.Range(0, 6).Select(i => olderDay.AddHours(9).AddSeconds(i)).ToList(), 50);
+
+        ConfigManager.Save(new AppConfig
+        {
+            ListenPort = FindBindablePort(),
+            IntervalMs = 300,
+            TimeoutMs = 1000,
+            EnableTcp = true,
+            EnableUdp = false,
+            EnableIcmp = false,
+            Isp = new IspConfig { Enabled = false },
+            Links = { new LinkConfig { Name = "本机", Host = "127.0.0.1", Port = echoPort, Tcp = true, Udp = false } }
+        });
+
+        try
+        {
+            RunOnSta(() =>
+            {
+                var window = new MainWindow();
+                var tabs = (TabControl)window.FindName("MainTabs")!;
+                var panel = (RttChartPanel)window.FindName("ChartPanel")!;
+                var chart = panel.ChartControl;
+
+                var content = (FrameworkElement)window.Content;
+                content.Measure(new Size(1360, 900));
+                content.Arrange(new Rect(0, 0, 1360, 900));
+                content.UpdateLayout();
+
+                Eq("默认范围是「最近 24 小时」", ChartRange.Last24Hours, panel.Range);
+
+                InvokePrivateHandler(window, "Start_Click");
+                Pump(2000);
+
+                var stats = (System.Collections.IList)GetPrivateField(window, "_stats")!;
+                var tcpRow = stats.Cast<StatRow>().First(r => r.Protocol == "TCP");
+                tcpRow.Plot = true;
+                Pump(600);
+
+                tabs.SelectedItem = window.FindName("ChartTab");
+                Pump(1500);
+
+                // 默认的 24 小时视图里应该同时有 12 小时前那份"上一个会话"的数据
+                var rangeText = (TextBlock)panel.FindName("RangeText")!;
+                Check("24 小时视图读的是 logs 日志", rangeText.Text.Contains("来源：logs 日志"), rangeText.Text);
+                Check("默认 24 小时视图里包含上一个会话的历史数据",
+                    chart.Series.Count == 1 && chart.Series[0].Samples.Any(s => s.Time < DateTime.Now.AddHours(-11)),
+                    $"{(chart.Series.Count > 0 ? chart.Series[0].Count : 0)} 条采样");
+
+                // 时间窗计算（不依赖数据，纯逻辑也该对）
+                var windows = panel.RangeWindow();
+                Check("「最近 24 小时」的时间窗是 [现在-24h, 现在]",
+                    panel.Range == ChartRange.Last24Hours &&
+                    Math.Abs((windows.To - DateTime.Now).TotalMinutes) < 1 &&
+                    Math.Abs((windows.From - DateTime.Now.AddHours(-24)).TotalMinutes) < 1,
+                    $"{windows.From:MM-dd HH:mm} ~ {windows.To:MM-dd HH:mm}");
+
+                // 选具体日期 = 3 天前 → 只看到那天那 6 条
+                var rangeBox = (ComboBox)panel.FindName("RangeBox")!;
+                var dayPicker = (DatePicker)panel.FindName("DayPicker")!;
+
+                rangeBox.SelectedIndex = (int)ChartRange.SpecificDay;
+                dayPicker.SelectedDate = olderDay;
+                Pump(800);
+
+                Eq("选日期后图上只有一条曲线", 1, chart.Series.Count);
+                Eq("读到了那天的全部 6 条采样", 6, chart.Series[0].Count);
+                Check("读到的确实是那天的数据",
+                    chart.Series[0].Samples.All(s => s.Time.Date == olderDay && s.RttMs >= 50),
+                    chart.Series[0].Samples.Count > 0 ? chart.Series[0].Samples[0].Time.ToString("MM-dd HH:mm:ss") : "无");
+
+                // 「昨天」快捷项走的是另一套时间窗计算，也要给对范围
+                rangeBox.SelectedIndex = (int)ChartRange.Yesterday;
+                Pump(500);
+                var yesterdayWindow = panel.RangeWindow();
+                Check("「昨天」的时间窗是 [昨天 00:00, 今天 00:00]",
+                    yesterdayWindow.From == DateTime.Today.AddDays(-1) && yesterdayWindow.To == DateTime.Today,
+                    $"{yesterdayWindow.From:MM-dd HH:mm} ~ {yesterdayWindow.To:MM-dd HH:mm}");
+
+                // 没有日志的日期：明确说"没有记录"，而不是画一张空图让人猜
+                rangeBox.SelectedIndex = (int)ChartRange.SpecificDay;
+                dayPicker.SelectedDate = DateTime.Today.AddDays(-10);
+                Pump(800);
+                Check("没有日志的日期上没有任何采样", chart.Series.All(s => s.Count == 0),
+                    string.Join(",", chart.Series.Select(s => s.Count)));
+                Check("并说明为什么是空的", rangeText.Text.Contains("没有") && rangeText.Text.Contains("logs"), rangeText.Text);
+
+                // 切回本会话：看到的是内存里正在记的实时数据
+                rangeBox.SelectedIndex = (int)ChartRange.Session;
+                Pump(1200);
+                Check("切回「本会话」后显示的是实时采样（今天 的）",
+                    chart.Series.Count == 1 && chart.Series[0].Samples.Any(s => s.Time >= DateTime.Today),
+                    $"采样 {(chart.Series.Count > 0 ? chart.Series[0].Count : 0)} 条");
+                Check("本会话来源标注正确", rangeText.Text.Contains("来源：本会话"), rangeText.Text);
+
+                InvokePrivateHandler(window, "Stop_Click");
+                window.Close();
+            }, "RTT 曲线历史范围断言");
+        }
+        finally
+        {
+            echoServer.Dispose();
+
+            foreach (var (path, directoryExisted) in historyFiles)
+            {
+                try { File.Delete(path); } catch { }
+
+                var directory = Path.GetDirectoryName(path)!;
+                if (!directoryExisted) { try { Directory.Delete(directory, true); } catch { } }
+            }
+
+            ConfigManager.OverridePath = previousOverride;
+            try { Directory.Delete(root, true); } catch { }
+        }
+    }
+
     // ---------------- ④ 真实窗口 ----------------
 
     private static void TestChartUi()

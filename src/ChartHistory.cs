@@ -96,6 +96,19 @@ public sealed class ChartSeries
         Trimmed = false;
     }
 
+    /// <summary>
+    /// 用外部数据（历史日志）**整体替换**采样。列表必须已按时间有序。
+    ///
+    /// 历史视图走这条路：数据来自 logs 里的 CSV，与内存里正在记的会话数据是两套，
+    /// 各自用各自的对象，互不干扰（切回「本会话」时内存里那份还是完整的）。
+    /// </summary>
+    public void SetSamples(IReadOnlyList<ChartSample> samples)
+    {
+        _samples.Clear();
+        _samples.AddRange(samples);
+        Trimmed = false;
+    }
+
     /// <summary>可见区间内的最大 RTT（Y 轴自适应用；丢包不参与）。</summary>
     public double MaxRtt(DateTime start, DateTime end)
     {

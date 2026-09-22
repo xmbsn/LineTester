@@ -109,10 +109,13 @@ internal static partial class Program
             await TestRegistryCompatMatrixAsync();
             TestRepoTemplateLoads();
             TestLinkConfigCloneIsComplete();
+            TestSentCounterIsCumulative();
             TestChartHistory();
+            await TestChartLogReaderAsync();
             TestChartMath();
             TestStatRowCopyFrom();
             TestChartRendersCurves();
+            TestChartHistoryUi();
             TestChartUi();
             TestIcmpPing();
             TestIcmpKeepsSending();

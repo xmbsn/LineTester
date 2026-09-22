@@ -119,6 +119,19 @@ public partial class MainWindow : Window
     private readonly HashSet<string> _chartSelection = new(StringComparer.Ordinal);
 
     /// <summary>
+    /// 历史曲线的数据源：直接读 logs 下的 CSV（逐包落盘的原始记录，本身就是"上一个会话"的数据）。
+    /// 增量读取，因此 24 小时视图可以跟着实时数据一起长。
+    /// </summary>
+    private readonly ChartLogReader _chartLog = new(Path.Combine(AppContext.BaseDirectory, "logs"));
+
+    /// <summary>历史视图的曲线对象（与内存里那份会话数据分开，互不干扰）。</summary>
+    private readonly ChartHistory _chartHistoryView = new();
+
+    private string _chartHistorySignature = "";
+    private int _chartLoadedSamples;
+    private string _chartLoadNote = "";
+
+    /// <summary>
     /// 探测循环每轮开始时读取的“当前会话号”。
     /// 必须每轮重新读取：若固定为启动时的值，点击“清除”后所有结果都会被当成陈旧数据丢弃，
     /// 统计将永远无法重新开始。
@@ -153,6 +166,9 @@ public partial class MainWindow : Window
 
         // 切到「RTT 曲线」页时立刻补画一次（不在这页时每 500 毫秒的重画就跳过了）
         MainTabs.SelectionChanged += (_, _) => RefreshChart();
+
+        // 曲线的时间范围/日期变化 → 立刻重新取数（默认「最近 24 小时」，数据来自 logs 日志）
+        ChartPanel.RangeChanged += OnChartRangeChanged;
 
         _log.ErrorOccurred += OnLogError;
 
@@ -1561,17 +1577,100 @@ public partial class MainWindow : Window
     /// <summary>
     /// 刷新曲线页。不在这一页时直接跳过——长会话下重画几万个点是有成本的，
     /// 没必要在用户看着别的页时每 500 毫秒白跑一次（切回来时会立刻补上）。
+    ///
+    /// 数据来源分两条：
+    /// <list type="bullet">
+    /// <item>「本会话（实时）」→ 内存里那份会话历史（含还没落盘的采样）；</item>
+    /// <item>其它范围（默认「最近 24 小时」/今天/昨天/指定日期）→ logs 里的 CSV 日志，
+    /// 增量读取，所以"重启测试之后照样能看到上一个会话的曲线"。</item>
+    /// </list>
     /// </summary>
     private void RefreshChart()
     {
         if (MainTabs.SelectedItem != ChartTab) return;
 
-        ChartPanel.Update(_chartHistory.SelectedSeries, _settings.WarningRttMs, _chartHistory.RecordedCount);
+        if (ChartPanel.Range == ChartRange.Session)
+        {
+            ChartPanel.Update(_chartHistory.SelectedSeries, _settings.WarningRttMs, _chartHistory.RecordedCount);
+            return;
+        }
+
+        LoadChartHistory(force: false);
+    }
+
+    /// <summary>用户切换了时间范围/日期/勾选 → 立刻重新取数。</summary>
+    private void OnChartRangeChanged()
+    {
+        _chartHistorySignature = "";
+        if (MainTabs.SelectedItem == ChartTab) LoadChartHistory(force: true);
+    }
+
+    /// <summary>
+    /// 从 logs 里读一段时间的历史曲线。
+    /// 只读**已勾选**的那几条（没勾选的不读盘、也不用画）；
+    /// 增量读取（尾部续读），所以包含"现在"的范围每 500 毫秒调一次也很便宜。
+    /// </summary>
+    private void LoadChartHistory(bool force)
+    {
+        var selected = _chartHistory.SelectedSeries;
+        var signature = ChartPanel.Range + "|" + ChartPanel.SelectedDay.ToString("yyyy-MM-dd") + "|" +
+                        string.Join(",", selected.Select(s => s.Key));
+
+        // 静态历史范围（昨天/指定日期）：内容不会再变，读一次就够
+        if (!force && !ChartPanel.RangeIncludesNow && signature == _chartHistorySignature) return;
+
+        var (from, to) = ChartPanel.RangeWindow();
+
+        if (selected.Count == 0)
+        {
+            _chartLoadedSamples = 0;
+            _chartLoadNote = "先在「链路实时统计」页勾选链路（最左侧的「曲线」列）";
+            _chartHistorySignature = signature;
+            ChartPanel.Update(Array.Empty<ChartSeries>(), _settings.WarningRttMs, _chartHistory.RecordedCount,
+                _chartLoadedSamples, _chartLoadNote);
+            return;
+        }
+
+        Dictionary<string, List<ChartSample>> loaded;
+        try
+        {
+            loaded = _chartLog.Load(selected.Select(s => s.Key), from, to);
+        }
+        catch (Exception ex)
+        {
+            _chartLoadNote = "读取日志失败：" + ex.Message;
+            return;
+        }
+
+        // 历史视图用**独立的**曲线对象，与内存里正在记的那份完全分开
+        var series = new List<ChartSeries>(selected.Count);
+        var total = 0;
+
+        foreach (var live in selected)
+        {
+            var historySeries = _chartHistoryView.Select(live.Key, live.LinkName, live.Protocol, live.Target);
+            var samples = loaded.TryGetValue(live.Key, out var list) ? list : new List<ChartSample>();
+
+            // 只有条数变了才整表拷贝（SetSamples 是 O(n)）
+            if (historySeries.Count != samples.Count) historySeries.SetSamples(samples);
+
+            series.Add(historySeries);
+            total += samples.Count;
+        }
+
+        _chartLoadNote = total == 0
+            ? $"logs 里没有 {from:MM-dd HH:mm} ~ {to:MM-dd HH:mm} 的记录（日志目录：{_chartLog.RootDirectory}）"
+            : ChartPanel.RangeIncludesNow ? "随实时数据自动追加" : "静态历史范围";
+
+        _chartLoadedSamples = total;
+        _chartHistorySignature = signature;
+
+        ChartPanel.Update(series, _settings.WarningRttMs, _chartHistory.RecordedCount, _chartLoadedSamples, _chartLoadNote);
     }
 
     /// <summary>
     /// 统计表最左侧的「曲线」勾选框变化 → 决定画哪几条曲线。
-    /// 取消勾选只停止画和停止收数据，**不清历史**：误点一下不该丢掉整段曲线。
+    /// 取消勾选只停止显示，**数据继续记、历史照留**：误点一下不该丢掉整段曲线。
     /// </summary>
     private void OnStatRowChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
@@ -1589,7 +1688,7 @@ public partial class MainWindow : Window
         }
 
         // 勾选后立刻出图，不必等下一个 500 毫秒 tick
-        if (MainTabs.SelectedItem == ChartTab) ChartPanel.Update(_chartHistory.SelectedSeries, _settings.WarningRttMs, _chartHistory.RecordedCount);
+        OnChartRangeChanged();
     }
 
     /// <summary>
