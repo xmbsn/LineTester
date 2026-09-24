@@ -8,6 +8,15 @@ public sealed class AppConfig
     public int ListenPort { get; set; } = 8800;
     public int IntervalMs { get; set; } = 1000;
     public int TimeoutMs { get; set; } = 1000;
+
+    /// <summary>
+    /// TCP/UDP 每次探测的串流模拟包总长度范围（含关联头与模拟媒体负载）。
+    /// 默认 900~1200B，接近为公网 MTU 留余量的实时音视频分片。
+    /// </summary>
+    public int StreamPacketMinBytes { get; set; } = StreamPacket.DefaultMinBytes;
+
+    public int StreamPacketMaxBytes { get; set; } = StreamPacket.DefaultMaxBytes;
+
     public int WarningRttMs { get; set; } = 300;
     public int StatWindowMinutes { get; set; } = 60;
 

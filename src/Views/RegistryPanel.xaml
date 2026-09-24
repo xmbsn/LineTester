@@ -277,7 +277,7 @@
                                 Click="OpenLogs_Click"
                                 ToolTip="打开 logs\日期\ 目录：registry-center.log（中心侧收发的每个注册/同步）、registry-client.log（本端注册与同步）、config.log（配置与链路改动）——排查问题时把这几份发出来即可"/>
                         <TextBlock Style="{StaticResource RegHint}" Margin="6,0,0,0" VerticalAlignment="Center"
-                                   Text="注册同步随“启动测试”一起运行；运行时改这里的参数需重新“启动测试”"/>
+                                   Text="子节点“启动测试”只登记本机已就绪；注册中心启动全局会话后，所有已就绪节点才开始发包"/>
                     </StackPanel>
                 </StackPanel>
             </Border>
@@ -288,7 +288,7 @@
                     <TextBlock Style="{StaticResource RegTitle}" Text="注册中心管理（本机是中心）"/>
 
                     <TextBlock Style="{StaticResource RegHint}" Margin="0,0,0,8"
-                               Text="「分发」取消勾选 = 该节点立刻从所有子节点的链路里消失，且不会被它的心跳顶回来（不改对端配置）。「移除」是权威删除，需在中心侧恢复后该节点才能重新注册。"/>
+                               Text="只有在线且显示“测试已就绪”的节点才会进入探测目标。子节点停止测试后会自动退出；「分发」可做中心侧强制隐藏。「移除」是权威删除，需在中心侧恢复后才能重新注册。"/>
 
                     <DataGrid x:Name="NodeGrid" AutoGenerateColumns="False" IsReadOnly="True"
                               HeadersVisibility="Column" CanUserAddRows="False" CanUserDeleteRows="False"

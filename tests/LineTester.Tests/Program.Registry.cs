@@ -306,7 +306,7 @@ internal static partial class Program
             Eq("节点自报不可分发使 rev+1", revBeforeSelfHide + 1, store.Revision);
             Eq("自报不可分发时快照为空", 0, store.BuildSnapshot().Count);
 
-            // 恢复为可分发病，再验证 TTL 行为（离线只标记不删）
+            // 恢复为可分发，再验证 TTL 行为：离线节点保留在中心清单，但必须退出探测目标快照
             clock = now.AddSeconds(300);
             store.Upsert(Msg("n1", "机房A-改名", "203.0.113.10", 50002, "i1"), true);
             Eq("恢复可分发病后快照恢复", 1, store.BuildSnapshot().Count);
@@ -316,7 +316,7 @@ internal static partial class Program
             Check("超 TTL 刷新在线状态", store.RefreshOnlineState());
             Eq("离线节点仍在清单里", 1, store.Nodes.Count);
             Check("节点被标记离线", !store.Nodes[0].Online);
-            Eq("离线节点仍进快照（不删链路）", 1, store.BuildSnapshot().Count);
+            Eq("离线节点退出探测目标快照（避免继续向已停机节点发包）", 0, store.BuildSnapshot().Count);
             Check("已离线时再次刷新不产生变化", !store.RefreshOnlineState());
 
             clock = lastSeen.AddSeconds(3 * 60 + 2);
@@ -326,11 +326,27 @@ internal static partial class Program
             Eq("在线恢复使 rev+1", revBeforeBack + 1, store.Revision);
             Check("在线状态已恢复", store.Nodes[0].Online);
 
+            // 两层门：节点本地就绪决定能否成为目标；中心全局会话决定所有就绪节点能否发包。
+            var notReady = Msg("n1", "机房A-改名", "203.0.113.10", 50002, "i1");
+            notReady.TestReady = false;
+            Check("节点停止测试使 revision 变化", store.Upsert(notReady, true).Changed);
+            Eq("未启动测试的节点不进入目标快照", 0, store.BuildSnapshot().Count);
+
+            var readyAgain = Msg("n1", "机房A-改名", "203.0.113.10", 50002, "i1");
+            readyAgain.TestReady = true;
+            Check("节点重新启动测试使 revision 变化", store.Upsert(readyAgain, true).Changed);
+            Eq("重新启动后节点恢复为探测目标", 1, store.BuildSnapshot().Count);
+
+            Check("中心可启动全局测试会话", store.SetGlobalTestRunning(true));
+            Check("全局测试状态已保存", store.GlobalTestRunning);
+            Check("重复启动全局测试不重复涨 revision", !store.SetGlobalTestRunning(true));
+
             var revBeforeReopen = store.Revision;
             var reopened = new RegistryStore(path, 60, () => clock);
             Eq("重开后 revision 保留（保持单调）", revBeforeReopen, reopened.Revision);
             Eq("重开后节点保留", 1, reopened.Nodes.Count);
             Eq("重开后节点名保留", "机房A-改名", reopened.Nodes[0].Name);
+            Check("重开后全局测试状态保留", reopened.GlobalTestRunning);
             Check("原子写不留 .tmp 残留", !File.Exists(path + ".tmp"));
 
             var revBeforeRemove = reopened.Revision;
@@ -661,7 +677,10 @@ internal static partial class Program
 
         try
         {
+            Check("中心启动全局测试会话", store.SetGlobalTestRunning(true));
             Check("A 注册成功", await nodeA.Client.RegisterNowAsync(), nodeA.Client.Status.LastError);
+            Check("A 收到中心的全局启动状态", nodeA.Client.Status.GlobalTestRunning);
+            Check("A 的全局测试控制租约有效", nodeA.Client.HasActiveGlobalTestLease(DateTime.UtcNow));
             Check("中心处理器没有抛异常", handlerError is null, handlerError?.ToString());
             Check("协议消息被端口分流到中心服务", handled > 0,
                 $"centerPort={centerPort} 收到 {handled} 帧；中心 rev={store.Revision}，清单 {store.Nodes.Count} 个节点");
@@ -680,6 +699,24 @@ internal static partial class Program
             Check("A 记录了中心 revision", nodeA.Client.Status.Revision > 0, nodeA.Client.Status.Revision.ToString());
             Check("记录了中心看到的本端源地址（与手填地址交叉核对）",
                 nodeA.Client.Status.SeenFrom?.StartsWith("127.0.0.1:") == true, nodeA.Client.Status.SeenFrom);
+
+            // B 本地停止：仍保留注册记录，但从 A 的探测目标中消失；重新启动后恢复。
+            nodeB.Client.SetTestReady(false);
+            Check("B 上报本地停止测试", await nodeB.Client.RegisterNowAsync(), nodeB.Client.Status.LastError);
+            Check("A 同步 B 的停止状态", await nodeA.Client.RegisterNowAsync(), nodeA.Client.Status.LastError);
+            Eq("B 未启动时 A 不向 B 建探测链路", 0, nodeA.Snapshot().Count);
+
+            nodeB.Client.SetTestReady(true);
+            Check("B 重新上报测试就绪", await nodeB.Client.RegisterNowAsync(), nodeB.Client.Status.LastError);
+            Check("A 同步 B 的重新启动状态", await nodeA.Client.RegisterNowAsync(), nodeA.Client.Status.LastError);
+            Eq("B 重新启动后 A 恢复 B 的探测链路", 1, nodeA.Snapshot().Count);
+
+            Check("中心结束全局测试会话", store.SetGlobalTestRunning(false));
+            Check("A 拉取全局停止状态", await nodeA.Client.RegisterNowAsync(), nodeA.Client.Status.LastError);
+            Check("全局停止后 A 的控制租约不允许发包", !nodeA.Client.HasActiveGlobalTestLease(DateTime.UtcNow));
+            Check("中心重新启动全局测试会话", store.SetGlobalTestRunning(true));
+            Check("A 拉取重新启动状态", await nodeA.Client.RegisterNowAsync(), nodeA.Client.Status.LastError);
+            Check("重新启动后 A 的控制租约恢复", nodeA.Client.HasActiveGlobalTestLease(DateTime.UtcNow));
 
             // ---- 删除传播：中心移除 B，且**心跳不会把它加回来** ----
             Check("中心移除节点 B", store.RemoveNode("b"));
@@ -714,6 +751,12 @@ internal static partial class Program
             Check("装了协议处理器后 UDP 探测仍成功", udpProbe is { Lost: false }, udpProbe?.Info);
             Check("探测结果仍带对端看到的源地址",
                 tcpProbe?.SeenFrom.StartsWith("127.0.0.1:") == true, tcpProbe?.SeenFrom);
+
+            centerServer.ProbeEnabled = false;
+            var gatedProbe = await probeClient.ProbeAsync(probeLink, "UDP", 200, CancellationToken.None);
+            Check("普通探测门关闭后不再应答探测包", gatedProbe is { Lost: true }, gatedProbe?.Info);
+            Check("探测门关闭时注册控制面仍可用", await nodeA.Client.RegisterNowAsync(), nodeA.Client.Status.LastError);
+            centerServer.ProbeEnabled = true;
 
             // ---- 协议日志 ----
             var logFiles = Directory.Exists(logDir)

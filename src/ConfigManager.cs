@@ -137,6 +137,12 @@ public static class ConfigManager
             problems.Add("IntervalMs 不能小于 50");
         if (config.TimeoutMs < 1)
             problems.Add("TimeoutMs 必须大于 0");
+        if (config.StreamPacketMinBytes < StreamPacket.MinBytes || config.StreamPacketMinBytes > StreamPacket.MaxBytes)
+            problems.Add($"StreamPacketMinBytes 必须在 {StreamPacket.MinBytes}~{StreamPacket.MaxBytes} 之间");
+        if (config.StreamPacketMaxBytes < StreamPacket.MinBytes || config.StreamPacketMaxBytes > StreamPacket.MaxBytes)
+            problems.Add($"StreamPacketMaxBytes 必须在 {StreamPacket.MinBytes}~{StreamPacket.MaxBytes} 之间");
+        if (config.StreamPacketMinBytes > config.StreamPacketMaxBytes)
+            problems.Add("StreamPacketMinBytes 不能大于 StreamPacketMaxBytes");
         if (config.WarningRttMs < 0)
             problems.Add("WarningRttMs 不能为负数");
         if (config.StatWindowMinutes < 1)

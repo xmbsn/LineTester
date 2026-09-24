@@ -26,6 +26,9 @@ public sealed class RegistryClientOptions
 
     public bool Distributable { get; set; } = true;
 
+    /// <summary>客户端创建时的本地测试就绪状态；运行中可由 SetTestReady 更新。</summary>
+    public bool TestReady { get; set; } = true;
+
     public string CenterHost { get; set; } = "";
     public int CenterPort { get; set; }
     public string Secret { get; set; } = "";
@@ -48,6 +51,12 @@ public sealed class RegistryClientStatus
     public ulong Revision { get; set; }
     public int NodeCount { get; set; }
 
+    /// <summary>中心下发的全局测试会话状态。</summary>
+    public bool GlobalTestRunning { get; set; }
+
+    /// <summary>最近一次收到中心全局状态的时间；用于中心失联后的安全租约。</summary>
+    public DateTime? GlobalStateReceivedUtc { get; set; }
+
     /// <summary>中心看到的本端源地址（与手填的 PublicHost 交叉核对用）。</summary>
     public string? SeenFrom { get; set; }
 
@@ -68,6 +77,9 @@ public sealed class RegistryClientStatus
 /// </summary>
 public sealed class RegistryClient : IDisposable
 {
+    public const int ControlPollSeconds = 2;
+    public const int ControlLeaseSeconds = 8;
+
     private readonly RegistryClientOptions _options;
     private readonly CancellationTokenSource _cts = new();
     private readonly string _instanceId = Guid.NewGuid().ToString("N");
@@ -89,10 +101,13 @@ public sealed class RegistryClient : IDisposable
     private bool _lastErrorFinal;
     private DateTime _nextHeartbeatUtc;
     private DateTime _nextSyncUtc;
+    private DateTime _nextControlPollUtc;
+    private volatile bool _testReady;
 
     public RegistryClient(RegistryClientOptions options)
     {
         _options = options;
+        _testReady = options.TestReady;
         _backoffMs = Math.Max(200, options.RetryMs);
         _log = options.LogDirectory.Length == 0
             ? null
@@ -103,6 +118,9 @@ public sealed class RegistryClient : IDisposable
     public event Action<IReadOnlyList<NodeSnapshot>>? SnapshotReceived;
 
     public event Action<RegistryClientStatus>? StatusChanged;
+
+    /// <summary>中心全局测试状态发生变化时通知宿主切换发包/应答门。</summary>
+    public event Action<bool>? GlobalTestStateChanged;
 
     public RegistryClientStatus Status { get; } = new();
 
@@ -125,6 +143,7 @@ public sealed class RegistryClient : IDisposable
         var now = DateTime.UtcNow;
         _nextHeartbeatUtc = now; // 启动即注册，不等一个周期
         _nextSyncUtc = now;
+        _nextControlPollUtc = now;
 
         Status.Running = true;
         Status.LastError = null;
@@ -165,6 +184,14 @@ public sealed class RegistryClient : IDisposable
     /// <summary>立即拉取一次（与注册等价，中心按 rev 决定是否下发快照）。</summary>
     public Task<bool> SyncNowAsync(CancellationToken ct = default) => RegisterNowAsync(ct);
 
+    /// <summary>更新本地测试就绪状态；调用方随后应立即 RegisterNowAsync 让中心尽快收敛。</summary>
+    public void SetTestReady(bool ready) => _testReady = ready;
+
+    /// <summary>全局会话必须为运行中，且中心控制租约仍有效；中心失联后自动停止发包。</summary>
+    public bool HasActiveGlobalTestLease(DateTime nowUtc)
+        => Status.GlobalTestRunning && Status.GlobalStateReceivedUtc is { } received &&
+           nowUtc - received <= TimeSpan.FromSeconds(ControlLeaseSeconds);
+
     private async Task LoopAsync(CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
@@ -173,7 +200,7 @@ public sealed class RegistryClient : IDisposable
             {
                 var now = DateTime.UtcNow;
 
-                if (now >= _nextHeartbeatUtc || now >= _nextSyncUtc)
+                if (now >= _nextHeartbeatUtc || now >= _nextSyncUtc || now >= _nextControlPollUtc)
                 {
                     var ok = await SendRegisterAsync(ct).ConfigureAwait(false);
 
@@ -182,12 +209,14 @@ public sealed class RegistryClient : IDisposable
                         _backoffMs = Math.Max(200, _options.RetryMs);
                         _nextHeartbeatUtc = DateTime.UtcNow + TimeSpan.FromSeconds(_effectiveHeartbeatSeconds);
                         _nextSyncUtc = DateTime.UtcNow + TimeSpan.FromSeconds(Math.Max(1, _options.SyncSeconds));
+                        _nextControlPollUtc = DateTime.UtcNow + TimeSpan.FromSeconds(ControlPollSeconds);
                     }
                     else
                     {
                         // 指数退避，封顶 30× 基础间隔，避免中心不可达时刷屏
                         _nextHeartbeatUtc = DateTime.UtcNow + TimeSpan.FromMilliseconds(_backoffMs);
                         _nextSyncUtc = _nextHeartbeatUtc;
+                        _nextControlPollUtc = DateTime.UtcNow + TimeSpan.FromSeconds(ControlPollSeconds);
                         _backoffMs = Math.Min(_backoffMs * 2, 30 * Math.Max(200, _options.RetryMs));
                     }
                 }
@@ -247,6 +276,7 @@ public sealed class RegistryClient : IDisposable
             Udp = _options.Udp,
             Icmp = _options.Icmp,
             Distributable = _options.Distributable,
+            TestReady = _testReady,
             Instance = _instanceId,
             Rev = Status.Revision,
             Ts = RegistryAuth.NowUnixSeconds(),
@@ -437,6 +467,9 @@ public sealed class RegistryClient : IDisposable
 
     private void ApplyAck(AckMessage ack)
     {
+        var globalChanged = Status.GlobalTestRunning != ack.GlobalTestRunning;
+        Status.GlobalTestRunning = ack.GlobalTestRunning;
+        Status.GlobalStateReceivedUtc = DateTime.UtcNow;
         Status.Revision = ack.Rev;
         Status.NodeCount = ack.Nodes?.Count ?? Status.NodeCount;
 
@@ -444,6 +477,8 @@ public sealed class RegistryClient : IDisposable
         {
             Status.SeenFrom = $"{ack.SelfCheck.SeenIp}:{ack.SelfCheck.SeenPort}";
         }
+
+        if (globalChanged) PublishGlobalTestState(ack.GlobalTestRunning);
 
         if (!ack.Changed) return;
 
@@ -459,6 +494,13 @@ public sealed class RegistryClient : IDisposable
         {
             SetError($"应用清单失败：{ex.Message}");
         }
+
+    }
+
+    private void PublishGlobalTestState(bool running)
+    {
+        try { GlobalTestStateChanged?.Invoke(running); }
+        catch { }
     }
 
     private bool TryResolveCenter(out IPEndPoint center, out string error)

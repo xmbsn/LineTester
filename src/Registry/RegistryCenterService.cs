@@ -147,7 +147,7 @@ public sealed class RegistryCenterService
 
         _log?.Write($"REG 成功 nodeId={Short(message.NodeId)} name={message.Name} " +
                     $"地址=[{string.Join(",", addresses)}] port={message.Port} tcp={message.Tcp} udp={message.Udp} icmp={message.Icmp} " +
-                    $"distributable={message.Distributable} rev {beforeRevision}→{_store.Revision} 清单 {_store.Nodes.Count} 个节点" +
+                    $"distributable={message.Distributable} testReady={message.TestReady} rev {beforeRevision}→{_store.Revision} 清单 {_store.Nodes.Count} 个节点" +
                     (message.Distributable && addresses.Count > 1 ? $"（多地址：会给每个地址各生成一条链路）" : ""));
 
         var replies = BuildAck(message.ReqId, message.Rev, remote);
@@ -226,7 +226,7 @@ public sealed class RegistryCenterService
 
     /// <summary>
     /// 组装 ACK。客户端 rev 与中心一致时走"短路应答"（<c>changed=false</c>，稳态只有 1 个包）；
-    /// 有变化时才下发完整可分发快照，超过单包上限则分块。
+    /// 有变化时才下发完整有效目标快照，超过单包上限则分块。
     /// </summary>
     private IReadOnlyList<byte[]> BuildAck(string requestId, ulong clientRevision, IPEndPoint? remote)
     {
@@ -242,7 +242,8 @@ public sealed class RegistryCenterService
             ReqId = requestId,
             Rev = revision,
             Changed = changed,
-            ReannounceAfter = _heartbeatSeconds
+            ReannounceAfter = _heartbeatSeconds,
+            GlobalTestRunning = _store.GlobalTestRunning
         };
 
         if (remote is not null)

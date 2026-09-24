@@ -14,13 +14,30 @@ namespace LineTester;
 public sealed class ProbeServer : IDisposable
 {
     private readonly int _port;
+    private readonly PassiveUdpAuditLog? _udpAudit;
     private TcpListener? _tcp;
     private UdpClient? _udp;
     private CancellationTokenSource? _cts;
 
-    public ProbeServer(int port) => _port = port;
+    public ProbeServer(int port, string? udpAuditDirectory = null)
+    {
+        _port = port;
+        if (!string.IsNullOrWhiteSpace(udpAuditDirectory)) _udpAudit = new PassiveUdpAuditLog(udpAuditDirectory);
+    }
 
     public bool DualStack { get; private set; }
+
+    /// <summary>
+    /// 是否接受普通探测包。注册协议帧不受此开关影响，使“测试已停止”时仍能维持协调控制面。
+    /// </summary>
+    public volatile bool ProbeEnabled = true;
+
+    /// <summary>被动 UDP 审计当天文件；未启用审计时为空。</summary>
+    public string? UdpAuditPath => _udpAudit?.CurrentPath;
+
+    /// <summary>供自检等待异步审计真正落盘；未启用时视为已经完成。</summary>
+    public Task<bool> WaitForUdpAuditIdleAsync(TimeSpan timeout)
+        => _udpAudit?.WaitForIdleAsync(timeout) ?? Task.FromResult(true);
 
     /// <summary>
     /// 注册协议消息处理器（规格 docs/REGISTRY-PROTOCOL.md §5.1）。
@@ -124,7 +141,7 @@ public sealed class ProbeServer : IDisposable
         using (client)
         {
             using var stream = client.GetStream();
-            var buffer = new byte[4096];
+            var buffer = new byte[StreamPacket.MaxBytes];
             try
             {
                 var n = await ReadFrameAsync(stream, buffer, ct).ConfigureAwait(false);
@@ -143,6 +160,8 @@ public sealed class ProbeServer : IDisposable
                     return;
                 }
 
+                if (!ProbeEnabled) return;
+
                 await stream.WriteAsync(BuildReply(buffer, n, remote), ct).ConfigureAwait(false);
             }
             catch { }
@@ -150,7 +169,8 @@ public sealed class ProbeServer : IDisposable
     }
 
     /// <summary>
-    /// 读一帧。探测包读一次即可（与既有行为一致）；协议帧以 <c>\n</c> 结束，需要读到结束符。
+    /// 读一帧。注册帧以 <c>\n</c> 结束；LT3 串流模拟包在头部声明总长度，
+    /// 因此 TCP 分段时也会读满再回显。老探测包仍维持“读一次即回显”的兼容语义。
     /// </summary>
     private static async Task<int> ReadFrameAsync(NetworkStream stream, byte[] buffer, CancellationToken ct)
     {
@@ -163,7 +183,17 @@ public sealed class ProbeServer : IDisposable
 
             read += n;
 
-            // 不是协议帧（探测包）→ 读一次就走，保持既有语义不变
+            if (StreamPacket.TryGetExpectedLength(buffer.AsSpan(0, read), out var expectedLength))
+            {
+                if (read >= expectedLength) return expectedLength;
+                continue;
+            }
+
+            // TCP 的第一次 Read 允许只拿到 "L" / "LT3|" 这类不完整的包头；
+            // 在确认不是 LT3 前缀前不能按老包的“一读即回显”路径退出。
+            if (StreamPacket.HasStreamPacketPrefix(buffer.AsSpan(0, read))) continue;
+
+            // 不是协议帧或 LT3 包（老探测包）→ 读一次就走，保持既有语义不变
             if (!RegistryProtocol.LooksLikeProtocolMessage(buffer, read)) break;
             if (buffer[read - 1] == RegistryProtocol.FrameTerminator) break;
         }
@@ -193,8 +223,24 @@ public sealed class ProbeServer : IDisposable
                     continue;
                 }
 
-                var reply = BuildReply(result.Buffer, result.Buffer.Length, result.RemoteEndPoint);
-                await _udp.SendAsync(reply.AsMemory(), result.RemoteEndPoint, ct).ConfigureAwait(false);
+                if (!ProbeEnabled) continue;
+
+                var receivedAt = DateTime.Now;
+                ParseProbeIdentity(result.Buffer, out var seq, out var probeId);
+                var remote = FormatEndpoint(result.RemoteEndPoint);
+                try
+                {
+                    var reply = BuildReply(result.Buffer, result.Buffer.Length, result.RemoteEndPoint);
+                    await _udp.SendAsync(reply.AsMemory(), result.RemoteEndPoint, ct).ConfigureAwait(false);
+                    _udpAudit?.Enqueue(receivedAt, remote, seq, probeId, replySent: true);
+                }
+                // 任何非取消错误都要留下“已收到、但未成功提交回包”的证据。
+                // 监听服务本身仍继续处理后续探测。
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _udpAudit?.Enqueue(receivedAt, remote, seq, probeId, replySent: false, ErrorText(ex));
+                    if (!ct.IsCancellationRequested) await SafeDelay(ct).ConfigureAwait(false);
+                }
             }
             catch (OperationCanceledException) { break; }
             catch (ObjectDisposedException) { break; }
@@ -207,6 +253,29 @@ public sealed class ProbeServer : IDisposable
         try { await Task.Delay(100, ct).ConfigureAwait(false); }
         catch (OperationCanceledException) { }
     }
+
+    private static void ParseProbeIdentity(byte[] buffer, out long? seq, out string probeId)
+    {
+        seq = null;
+        probeId = "";
+
+        // 老探测格式是“seq|32位探测ID|v2”；LT3 串流包是
+        // “LT3|seq|32位探测ID|v2|总长度|二进制媒体样式负载”。解析失败照样写审计，
+        // 但不把任意 UDP 载荷误标为可关联的测试包。
+        var parts = Encoding.UTF8.GetString(buffer).Split('|');
+        var offset = parts.Length > 0 && parts[0] == "LT3" ? 1 : 0;
+        if (parts.Length < offset + 2 || !long.TryParse(parts[offset], out var parsedSeq)) return;
+        if (parts[offset + 1].Length != 32 || !parts[offset + 1].All(Uri.IsHexDigit)) return;
+
+        seq = parsedSeq;
+        probeId = parts[offset + 1];
+    }
+
+    private static string ErrorText(Exception ex) => ex switch
+    {
+        SocketException socket => socket.SocketErrorCode.ToString(),
+        _ => ex.GetType().Name
+    };
 
     // ---------------- 回包组装 ----------------
 
@@ -229,13 +298,16 @@ public sealed class ProbeServer : IDisposable
         if (remote is null || !RequestsObservedAddress(request, length))
             return length == request.Length ? request : request.AsSpan(0, length).ToArray();
 
-        var payload = Encoding.UTF8.GetString(request, 0, length);
-        var reply = payload + "|" + FormatEndpoint(remote) + (char)ReplyTerminator;
-        return Encoding.UTF8.GetBytes(reply);
+        var trailer = Encoding.UTF8.GetBytes("|" + FormatEndpoint(remote) + (char)ReplyTerminator);
+        var reply = new byte[length + trailer.Length];
+        request.AsSpan(0, length).CopyTo(reply);
+        trailer.CopyTo(reply, length);
+        return reply;
     }
 
     private static bool RequestsObservedAddress(byte[] request, int length)
     {
+        if (StreamPacket.IsStreamPacket(request.AsSpan(0, length))) return true;
         if (length < ObservedAddressRequest.Length) return false;
 
         for (var i = 0; i < ObservedAddressRequest.Length; i++)
@@ -271,6 +343,7 @@ public sealed class ProbeServer : IDisposable
         try { _tcp?.Stop(); } catch { }
         try { _udp?.Dispose(); } catch { }
         try { _cts?.Dispose(); } catch { }
+        try { _udpAudit?.Dispose(); } catch { }
         _tcp = null;
         _udp = null;
         _cts = null;

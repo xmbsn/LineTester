@@ -218,6 +218,7 @@
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
                     <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
                 <Grid Grid.Row="0">
@@ -279,17 +280,40 @@
                     </StackPanel>
                 </Grid>
 
-                <CheckBox Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="8" x:Name="IspCheck"
-                          Style="{StaticResource FieldCheck}" Margin="0,10,0,0"
-                          HorizontalAlignment="Left" IsChecked="True"
-                          Checked="IspCheck_Changed" Unchecked="IspCheck_Changed"
-                          Content="显示运营商信息并判断是否跨运营商（联网查询 ip-api.com，可关闭）"
-                          ToolTip="查本端出口 IP 与目标地址的运营商：同运营商=绿灯、跨运营商=红灯、数据不足=灰灯。免费接口只支持 HTTP 明文、15 次/分钟，因此结果会缓存（默认 30 天）且只查公网地址；取消勾选后程序一个字节都不会往外发。"/>
+                <Grid Grid.Row="2" Margin="0,10,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <CheckBox Grid.Column="0" x:Name="IspCheck"
+                              Style="{StaticResource FieldCheck}" Margin="0"
+                              HorizontalAlignment="Left" IsChecked="True"
+                              Checked="IspCheck_Changed" Unchecked="IspCheck_Changed"
+                              Content="显示运营商信息并判断是否跨运营商（联网查询 ip-api.com，可关闭）"
+                              ToolTip="查本端出口 IP 与目标地址的运营商：同运营商=绿灯、跨运营商=红灯、数据不足=灰灯。免费接口只支持 HTTP 明文、15 次/分钟，因此结果会缓存（默认 30 天）且只查公网地址；取消勾选后程序一个字节都不会往外发。"/>
 
-                <Button Grid.Row="2" Grid.Column="8" x:Name="IspRefreshButton" Content="重查"
-                        Style="{StaticResource BaseButton}" Margin="8,6,0,0" HorizontalAlignment="Left"
-                        MinWidth="64" Padding="10,4" Click="IspRefresh_Click"
-                        ToolTip="清掉本地运营商缓存并立刻重新查询（换了网络/改了目标/怀疑结果不对时用）"/>
+                    <Button Grid.Column="2" x:Name="IspRefreshButton" Content="重查"
+                            Style="{StaticResource BaseButton}" Margin="8,0,0,0"
+                            MinWidth="64" Padding="10,4" Click="IspRefresh_Click"
+                            ToolTip="清掉本地运营商缓存并立刻重新查询（换了网络/改了目标/怀疑结果不对时用）"/>
+                </Grid>
+
+                <Grid Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="9" Margin="0,10,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" Style="{StaticResource FieldLabel}" Text="串流包大小(B)"/>
+                    <TextBox Grid.Column="1" x:Name="StreamPacketMinBox" Style="{StaticResource FieldBox}" Margin="0,0,6,0"
+                             ToolTip="TCP/UDP 每次从下限到上限之间随机选一个总包长。默认 900B，贴近实时桌面串流的较小媒体分片。"/>
+                    <TextBlock Grid.Column="2" Style="{StaticResource FieldLabel}" Text="至" Margin="0,0,6,0"/>
+                    <TextBox Grid.Column="3" x:Name="StreamPacketMaxBox" Style="{StaticResource FieldBox}" Margin="0,0,16,0"
+                             ToolTip="默认 1200B：为公网 MTU 留余量，降低路径 MTU 不一致时的 IP 分片概率。可设到 65000B 以刻意测试分片。"/>
+                    <TextBlock Grid.Column="4" VerticalAlignment="Center" Foreground="#5F6368" TextWrapping="Wrap"
+                               Text="TCP / UDP 随机模拟 900–1200B 的实时媒体分片；负载含视频起始码、帧序号和高熵二进制填充。ICMP 保持小包。"/>
+                </Grid>
             </Grid>
         </Border>
 
@@ -590,9 +614,9 @@
                     <LineBreak/>
                     <Bold>RTT 口径</Bold>：从发出首个探测字节到收齐对端回包（不含 DNS 解析与 TCP 建连），因此 TCP 与 UDP 两行可直接比较；建连与解析耗时单独记录在“建连/解析(ms)”列与日志的 setup_ms 字段。
                     <LineBreak/>
-                    <Bold>探测包内容</Bold>为“序号|探测ID|v2”：序号按链路+协议从 1 开始单调递增，运行期间不清零，界面详单、CSV 日志与抓包可按序号对齐；序号跳号表示该次探测结果未被记录（停止/清除时丢弃），真正的丢包会照常记为一行 packet_loss=1。
+                    <Bold>串流模拟包</Bold>：TCP/UDP 每次会在“串流包大小”上下限间随机选取总长度（默认 900~1200B），前段带序号与探测ID，后段是视频分片起始码、帧序号和高熵二进制填充；它不可播放，但在抓包中的长度与内容形态更接近实时桌面串流。ICMP 继续使用小包。序号按链路+协议从 1 开始单调递增，运行期间不清零，界面详单、CSV 日志与抓包可按序号对齐；序号跳号表示该次探测结果未被记录（停止/清除时丢弃），真正的丢包会照常记为一行 packet_loss=1。
                     <LineBreak/>
-                    <Bold>对端看到的源地址</Bold>：探测包末尾带 v2 标记时，被动端会把“它看到的你的源地址（ip:端口）”附加在回包里，界面与日志都会记录（列名 seen_from）。跨公网时这就是你的出口公网 IP 与 NAT 后的源端口；如果它会随时间变化，说明出口做了多线路负载均衡或运营商 NAT 池。对端是修复前的老版本时不带这个字段（不影响探测）。
+                    <Bold>对端看到的源地址</Bold>：探测包带 v2 标记时，被动端会把“它看到的你的源地址（ip:端口）”附加在回包里，界面与日志都会记录（列名 seen_from）。跨公网时这就是你的出口公网 IP 与 NAT 后的源端口；如果它会随时间变化，说明出口做了多线路负载均衡或运营商 NAT 池。对端是修复前的老版本时不带这个字段（不影响探测）。
                     <Bold>失败原因</Bold>：丢包不再只有一句话。「无响应（超时）」表示包在到达监听者之前被丢弃（查端口映射 / ACL / 防火墙 / 运营商）；
                     「连接被拒绝（端口无监听）」表示网络路径是通的、只是该端口没有程序在监听；UDP 收到 ICMP 则会显示「UDP 端口不可达（收到 ICMP）」。逐条记在 CSV 的 failure 列。
                     <LineBreak/>

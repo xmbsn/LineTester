@@ -38,6 +38,7 @@ public static class RegistryUiText
 
         return new StatusNote(
             $"注册中心 {center} · rev {status.Revision} · 节点 {status.NodeCount} · " +
+            $"全局测试{(status.GlobalTestRunning ? "运行中" : "已停止")} · " +
             $"{status.LastSuccessUtc.Value.ToLocalTime():HH:mm} 同步", false);
     }
 
@@ -146,7 +147,7 @@ public static class RegistryUiText
 
     /// <summary>中心节点表里的状态列：在线/分发/认证/疑似重复。</summary>
     public static string DescribeNodeState(RegistryNode node)
-        => DescribeNodeState(node.Online, node.Distributable, node.CenterHidden, node.Authenticated, node.DuplicateSuspected);
+        => DescribeNodeState(node.Online, node.Distributable, node.CenterHidden, node.Authenticated, node.DuplicateSuspected, node.TestReady);
 
     public static string DescribeNodeState(
         bool online, bool distributable, bool centerHidden, bool authenticated, bool duplicateSuspected)
@@ -154,6 +155,21 @@ public static class RegistryUiText
         var parts = new List<string>(4)
         {
             online ? "在线" : "离线",
+            distributable && !centerHidden ? "分发中" : centerHidden ? "已隐藏" : "对端关分发",
+            authenticated ? "已认证" : "无密钥"
+        };
+
+        if (duplicateSuspected) parts.Add("⚠ 疑似重复 nodeId");
+        return string.Join(" · ", parts);
+    }
+
+    public static string DescribeNodeState(
+        bool online, bool distributable, bool centerHidden, bool authenticated, bool duplicateSuspected, bool testReady)
+    {
+        var parts = new List<string>(5)
+        {
+            online ? "在线" : "离线",
+            testReady ? "测试已就绪" : "未启动测试",
             distributable && !centerHidden ? "分发中" : centerHidden ? "已隐藏" : "对端关分发",
             authenticated ? "已认证" : "无密钥"
         };

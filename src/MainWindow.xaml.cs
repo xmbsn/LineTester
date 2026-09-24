@@ -98,6 +98,8 @@ public partial class MainWindow : Window
     private RegistryClient? _registryClient;
     private RegistryStore? _registryStore;
     private RegistryCenterService? _registryCenter;
+    private bool _localTestReady;
+    private string _networkServiceSignature = "";
 
     /// <summary>当前同步客户端"登记在案"的注册参数签名：变了就重建客户端，让中心立刻看到新值。</summary>
     private string _registryClientSignature = "";
@@ -276,6 +278,8 @@ public partial class MainWindow : Window
         ListenPortBox.Text = cfg.ListenPort.ToString(CultureInfo.InvariantCulture);
         IntervalBox.Text = cfg.IntervalMs.ToString(CultureInfo.InvariantCulture);
         TimeoutBox.Text = cfg.TimeoutMs.ToString(CultureInfo.InvariantCulture);
+        StreamPacketMinBox.Text = cfg.StreamPacketMinBytes.ToString(CultureInfo.InvariantCulture);
+        StreamPacketMaxBox.Text = cfg.StreamPacketMaxBytes.ToString(CultureInfo.InvariantCulture);
         WarningBox.Text = cfg.WarningRttMs.ToString(CultureInfo.InvariantCulture);
         WindowBox.Text = cfg.StatWindowMinutes.ToString(CultureInfo.InvariantCulture);
         LossWarnBox.Text = cfg.LossWarnPercent.ToString("0.###", CultureInfo.InvariantCulture);
@@ -721,13 +725,15 @@ public partial class MainWindow : Window
         if (!int.TryParse(ListenPortBox.Text, out var listenPort) || listenPort < 1 || listenPort > 65535 ||
             !int.TryParse(IntervalBox.Text, out var interval) || interval < 50 ||
             !int.TryParse(TimeoutBox.Text, out var timeout) || timeout < 1 ||
+            !int.TryParse(StreamPacketMinBox.Text, out var streamPacketMin) || streamPacketMin < StreamPacket.MinBytes || streamPacketMin > StreamPacket.MaxBytes ||
+            !int.TryParse(StreamPacketMaxBox.Text, out var streamPacketMax) || streamPacketMax < StreamPacket.MinBytes || streamPacketMax > StreamPacket.MaxBytes || streamPacketMin > streamPacketMax ||
             !int.TryParse(WarningBox.Text, out var warning) || warning < 0 ||
             !int.TryParse(WindowBox.Text, out var window) || window < 1 ||
             !int.TryParse(LossCountBox.Text, out var lossCount) || lossCount < 1 ||
             !TryParseDouble(LossWarnBox.Text, out var lossWarn) || lossWarn < 0)
         {
             MessageBox.Show(
-                "配置参数无效，请检查：监听端口(1~65535)、测试间隔(≥50ms)、超时(≥1ms)、" +
+                $"配置参数无效，请检查：监听端口(1~65535)、测试间隔(≥50ms)、超时(≥1ms)、串流包大小({StreamPacket.MinBytes}~{StreamPacket.MaxBytes}B，且下限不大于上限)、" +
                 "统计窗口(≥1分钟)、异常RTT阈值(≥0)、丢包率告警(≥0)、连续丢包告警(≥1)。",
                 "配置错误", MessageBoxButton.OK, MessageBoxImage.Warning);
             return false;
@@ -736,6 +742,8 @@ public partial class MainWindow : Window
         _settings.ListenPort = listenPort;
         _settings.IntervalMs = interval;
         _settings.TimeoutMs = timeout;
+        _settings.StreamPacketMinBytes = streamPacketMin;
+        _settings.StreamPacketMaxBytes = streamPacketMax;
         _settings.WarningRttMs = warning;
         _settings.StatWindowMinutes = window;
         _settings.LossWarnPercent = lossWarn;
@@ -893,43 +901,22 @@ public partial class MainWindow : Window
         // 配置文件本身有错时不做隐式覆盖，仅按界面值运行
         if (_configLoadError is null && !TrySaveConfig()) return;
 
-        StopInternal();
+        StopProbeEngine();
 
         try
         {
             var notes = new List<string>();
+            _localTestReady = true;
+            EnsureNetworkServices(notes);
 
-            var server = new ProbeServer(_settings.ListenPort);
-            server.Start();
-            _server = server;
-
-            // 注册协议与探测共用同一个监听端口：按 LT1| 前缀分流。
-            // 中心 → 处理注册消息；非中心 → 明确回 ERR unsupported（比静默回显更容易现场定位）。
             if (_settings.Registrar.ServeAsCenter)
             {
-                var store = EnsureRegistryStore();
-                _registryCenter = new RegistryCenterService(
-                    store, _settings.Registrar.Secret, _settings.Registrar.HeartbeatSeconds, null, _centerLog);
-                server.ProtocolHandler = _registryCenter.HandleAsync;
-
-                _centerLog.Section($"中心启动：清单 {store.Nodes.Count} 个节点，密钥 {AppLog.Redact(_settings.Registrar.Secret)}");
-                foreach (var node in store.Nodes)
-                {
-                    _centerLog.Write($"  已有节点 {node.Name} [{node.NodeId[..Math.Min(8, node.NodeId.Length)]}] " +
-                                     $"地址=[{string.Join(",", node.Ips.Count > 0 ? node.Ips : new List<string> { node.Ip })}] " +
-                                     $"port={node.Port} tcp={node.Tcp} udp={node.Udp} icmp={node.Icmp} online={node.Online} lastSeen={node.LastSeenUtc:u}");
-                }
-
-                notes.Add($"本机同时是注册中心：清单 {store.Nodes.Count} 个节点");
+                EnsureRegistryStore().SetGlobalTestRunning(true);
+                notes.Add("全局测试会话已启动；已就绪子节点将在 2 秒左右开始探测");
             }
-            else
-            {
-                _registryCenter = null;
-                var secret = _settings.Registrar.Secret;
-                var unsupported = RegistryCenterService.RespondUnsupportedAsync;
-                server.ProtocolHandler = (request, length, _, _) =>
-                    unsupported(secret, request, length, CancellationToken.None);
-            }
+
+            _registryClient?.SetTestReady(true);
+            if (_registryClient is not null) _ = _registryClient.RegisterNowAsync();
 
             _session.Configure(_settings);
             ClearSession();
@@ -939,7 +926,6 @@ public partial class MainWindow : Window
             _appliedLinksSignature = LinksSignature();
             UpdateLinkSummary();
 
-            StartRegistryClient(notes);
             StartIspLookup();
             RequestIspForLinks(_liveLinks);
 
@@ -947,14 +933,21 @@ public partial class MainWindow : Window
             _cts = cts;
             _loop = Task.Run(() => TestLoop(cts.Token));
 
-            if (!server.DualStack) notes.Add("本机不支持 IPv6，监听为仅 IPv4");
+            UpdateProbeGate();
+
+            if (_server?.DualStack == false) notes.Add("本机不支持 IPv6，监听为仅 IPv4");
             if (ActiveProbeCount() == 0) notes.Add("当前没有生效的探测（未勾选协议，或链路未启用该协议），只会监听应答");
+            if (_settings.Registrar.Enabled && !CanRunCoordinatedTest())
+                notes.Add("本节点已就绪，正在等待注册中心启动全局测试会话");
 
             UpdateStatus(notes.Count == 0 ? null : string.Join("；", notes));
             RefreshRegistryUi();
         }
         catch (Exception ex)
         {
+            // 中心启动流程若在全局开闸后失败，不能把“运行中”状态遗留到持久化状态里。
+            if (_settings.Registrar.ServeAsCenter)
+                _registryStore?.SetGlobalTestRunning(false);
             StopInternal();
             MessageBox.Show("启动失败：" + ex.Message, "启动失败",
                 MessageBoxButton.OK, MessageBoxImage.Error);
@@ -962,10 +955,24 @@ public partial class MainWindow : Window
         }
     }
 
-    private void Stop_Click(object sender, RoutedEventArgs e)
+    private async void Stop_Click(object sender, RoutedEventArgs e)
     {
-        StopInternal();
-        UpdateStatus("已停止（界面保留已统计到的数据，可点“清除”重新开始统计）");
+        if (_settings.Registrar.Enabled && _settings.Registrar.ServeAsCenter)
+        {
+            EnsureRegistryStore().SetGlobalTestRunning(false);
+            StopProbeEngine();
+            if (_registryClient is not null) await _registryClient.RegisterNowAsync();
+            UpdateStatus("全局测试会话已结束：所有节点将在 2 秒左右停止发包；界面保留统计数据");
+        }
+        else
+        {
+            _localTestReady = false;
+            _registryClient?.SetTestReady(false);
+            StopProbeEngine();
+            if (_registryClient is not null) await _registryClient.RegisterNowAsync();
+            UpdateStatus("本节点已停止并退出探测目标：其他节点将在 2 秒左右不再向本机发包");
+        }
+        if (!_settings.Registrar.Enabled) ShutdownNetworkServices();
     }
 
     private void Clear_Click(object sender, RoutedEventArgs e)
@@ -997,7 +1004,7 @@ public partial class MainWindow : Window
         while (_pending.TryDequeue(out _)) { }
     }
 
-    private void StopInternal()
+    private void StopProbeEngine()
     {
         var cts = _cts;
         var loop = _loop;
@@ -1006,18 +1013,10 @@ public partial class MainWindow : Window
 
         cts?.Cancel();
 
-        StopRegistryClient();
-
         // 注意：**不**停运营商查询。停止测试后统计表还在，行里的运营商信息必须继续显示——
         // "停止测试"只是不再发包，不是把已经查到的资料藏起来（曾因为在这里销毁服务，
         // 停止后整个运营商列变成"未启用"）。
-        _server?.Dispose();
-        _server = null;
-
-        // 中心服务与清单实例随本次运行结束（清单已落盘，界面下一次刷新会重新读文件）。
-        // 留着旧实例会让"停止后再改参数启动"出现两个写入同一文件的实例。
-        _registryCenter = null;
-        _registryStore = null;
+        if (_server is not null) _server.ProbeEnabled = false;
         _liveLinks = Array.Empty<LinkConfig>();
 
         if (cts is not null)
@@ -1032,6 +1031,63 @@ public partial class MainWindow : Window
                 cts.Dispose();
             });
         }
+    }
+
+    private void StopInternal()
+    {
+        StopProbeEngine();
+        ShutdownNetworkServices();
+    }
+
+    private void ShutdownNetworkServices()
+    {
+        StopRegistryClient();
+        _server?.Dispose();
+        _server = null;
+        _registryCenter = null;
+        _registryStore = null;
+        _networkServiceSignature = "";
+    }
+
+    /// <summary>
+    /// 启动监听与注册控制面。注册模式下停止测试只关闭普通探测门，控制面继续运行，
+    /// 这样中心仍能把全局停止/再次启动状态下发给所有已就绪节点。
+    /// </summary>
+    private void EnsureNetworkServices(List<string> notes)
+    {
+        var signature = $"{_settings.ListenPort}|{_settings.Registrar.Enabled}|{_settings.Registrar.ServeAsCenter}|" +
+                        $"{_settings.Registrar.Secret}|{_settings.Registrar.HeartbeatSeconds}";
+
+        if (_server is not null && _networkServiceSignature != signature) ShutdownNetworkServices();
+
+        if (_server is null)
+        {
+            var server = new ProbeServer(_settings.ListenPort, Path.Combine(AppContext.BaseDirectory, "logs"))
+            {
+                ProbeEnabled = false
+            };
+            server.Start();
+            _server = server;
+            _networkServiceSignature = signature;
+
+            if (_settings.Registrar.ServeAsCenter)
+            {
+                var store = EnsureRegistryStore();
+                _registryCenter = new RegistryCenterService(
+                    store, _settings.Registrar.Secret, _settings.Registrar.HeartbeatSeconds, null, _centerLog);
+                server.ProtocolHandler = _registryCenter.HandleAsync;
+                notes.Add($"本机同时是注册中心：清单 {store.Nodes.Count} 个节点");
+            }
+            else
+            {
+                var secret = _settings.Registrar.Secret;
+                var unsupported = RegistryCenterService.RespondUnsupportedAsync;
+                server.ProtocolHandler = (request, length, _, _) =>
+                    unsupported(secret, request, length, CancellationToken.None);
+            }
+        }
+
+        if (_settings.Registrar.Enabled && _registryClient is null) StartRegistryClient(notes);
     }
 
     // ---------------- 注册中心（切片 3） ----------------
@@ -1069,6 +1125,7 @@ public partial class MainWindow : Window
             Udp = _settings.Registrar.AdvertiseUdp,
             Icmp = _settings.Registrar.AdvertiseIcmp,
             Distributable = _settings.Registrar.Distributable,
+            TestReady = _localTestReady,
             CenterHost = _settings.Registrar.CenterHost,
             CenterPort = _settings.Registrar.CenterPort,
             Secret = _settings.Registrar.Secret,
@@ -1081,11 +1138,13 @@ public partial class MainWindow : Window
 
         var client = new RegistryClient(options);
         client.SnapshotReceived += OnRegistrySnapshot;
+        client.GlobalTestStateChanged += OnGlobalTestStateChanged;
 
         if (!client.Start())
         {
             notes.Add("注册同步未启动：" + (client.Status.LastError ?? "未知原因"));
             client.SnapshotReceived -= OnRegistrySnapshot;
+            client.GlobalTestStateChanged -= OnGlobalTestStateChanged;
             client.Dispose();
             return;
         }
@@ -1135,7 +1194,38 @@ public partial class MainWindow : Window
         if (client is null) return;
 
         client.SnapshotReceived -= OnRegistrySnapshot;
+        client.GlobalTestStateChanged -= OnGlobalTestStateChanged;
         try { client.Dispose(); } catch { }
+    }
+
+    private void OnGlobalTestStateChanged(bool running)
+    {
+        try
+        {
+            Dispatcher.InvokeAsync(() =>
+            {
+                UpdateProbeGate();
+                if (_cts is not null)
+                    UpdateStatus(running
+                        ? "注册中心已启动全局测试会话，本节点开始探测"
+                        : "注册中心已结束全局测试会话，本节点停止发包并保留统计数据");
+            });
+        }
+        catch { }
+    }
+
+    private bool CanRunCoordinatedTest()
+    {
+        if (!_localTestReady) return false;
+        if (!_settings.Registrar.Enabled) return true;
+        if (_settings.Registrar.ServeAsCenter) return _registryStore?.GlobalTestRunning == true;
+        return _registryClient?.HasActiveGlobalTestLease(DateTime.UtcNow) == true;
+    }
+
+    private void UpdateProbeGate()
+    {
+        if (_server is not null)
+            _server.ProbeEnabled = _cts is not null && CanRunCoordinatedTest();
     }
 
     /// <summary>客户端回调来自后台同步线程，一律切回 UI 线程再动界面与配置。</summary>
@@ -1502,6 +1592,15 @@ public partial class MainWindow : Window
 
         while (!ct.IsCancellationRequested)
         {
+            // 注册模式有两道门：本节点已就绪 + 中心全局会话正在运行且控制租约有效。
+            // 中心失联超过租约后宁可停发，也不继续对无人值守的节点制造流量。
+            if (!CanRunCoordinatedTest())
+            {
+                try { await Task.Delay(250, ct).ConfigureAwait(false); }
+                catch (OperationCanceledException) { break; }
+                continue;
+            }
+
             var roundStart = Stopwatch.StartNew();
             var epoch = Volatile.Read(ref _loopEpoch);
 
@@ -1516,8 +1615,10 @@ public partial class MainWindow : Window
             var tasks = new List<Task<ProbeResult?>>(links.Length * 3);
             foreach (var link in links)
             {
-                if (sendTcp && link.Tcp) tasks.Add(_client.ProbeAsync(link, ProbeClient.ProtocolTcp, timeout, ct));
-                if (sendUdp && link.Udp) tasks.Add(_client.ProbeAsync(link, ProbeClient.ProtocolUdp, timeout, ct));
+                if (sendTcp && link.Tcp) tasks.Add(_client.ProbeAsync(link, ProbeClient.ProtocolTcp, timeout, ct,
+                    _settings.StreamPacketMinBytes, _settings.StreamPacketMaxBytes));
+                if (sendUdp && link.Udp) tasks.Add(_client.ProbeAsync(link, ProbeClient.ProtocolUdp, timeout, ct,
+                    _settings.StreamPacketMinBytes, _settings.StreamPacketMaxBytes));
                 if (sendIcmp && link.Icmp) tasks.Add(_client.ProbeAsync(link, ProbeClient.ProtocolIcmp, timeout, ct));
             }
 
@@ -1581,6 +1682,7 @@ public partial class MainWindow : Window
 
     private void OnUiTick(object? sender, EventArgs e)
     {
+        UpdateProbeGate();
         DrainPendingResults();
         ApplyLiveLinksIfDue();
         RefreshStats();
@@ -1938,17 +2040,20 @@ public partial class MainWindow : Window
     private void RefreshStatusBar()
     {
         var running = _cts is not null;
+        var coordinatedRunning = running && CanRunCoordinatedTest();
 
-        StatusDot.Fill = new SolidColorBrush(running
+        StatusDot.Fill = new SolidColorBrush(coordinatedRunning
             ? Color.FromRgb(0x1E, 0x8E, 0x3E)
-            : Color.FromRgb(0x9A, 0xA0, 0xA6));
-        StatusText.Text = running ? "运行中" : "已停止";
+            : running
+                ? Color.FromRgb(0xF2, 0x99, 0x00)
+                : Color.FromRgb(0x9A, 0xA0, 0xA6));
+        StatusText.Text = coordinatedRunning ? "运行中" : running ? "等待中心" : "已停止";
 
         var protocols = DescribeProtocolSwitches(_liveTcp, _liveUdp, _liveIcmp);
 
         StatusParams.Text = running
-            ? $"监听 {_settings.ListenPort} | 协议 {protocols} | 生效探测 {ActiveProbeCount()} 路 | " +
-              $"间隔 {_settings.IntervalMs}ms | 超时 {_settings.TimeoutMs}ms"
+            ? $"监听 {_settings.ListenPort} | 协议 {protocols} | {(coordinatedRunning ? "生效探测" : "待命探测")} {ActiveProbeCount()} 路 | " +
+              $"间隔 {_settings.IntervalMs}ms | 超时 {_settings.TimeoutMs}ms | 串流包 {_settings.StreamPacketMinBytes}~{_settings.StreamPacketMaxBytes}B"
             : $"监听 {_settings.ListenPort}（未启动） | 协议 {protocols}";
 
         StatusSamples.Text = $"本会话样本 {_session.TotalSamples}";
@@ -2039,6 +2144,18 @@ public partial class MainWindow : Window
     protected override void OnClosed(EventArgs e)
     {
         _uiTimer.Stop();
+
+        // 正常退出尽量把“未就绪”送到中心；即使来不及送达，其他节点也会在控制租约过期后停发。
+        if (_settings.Registrar.ServeAsCenter)
+            _registryStore?.SetGlobalTestRunning(false);
+
+        if (_registryClient is { } client && client.Status.LastSuccessUtc is not null)
+        {
+            client.SetTestReady(false);
+            using var farewell = new CancellationTokenSource(TimeSpan.FromMilliseconds(800));
+            try { client.RegisterNowAsync(farewell.Token).GetAwaiter().GetResult(); } catch { }
+        }
+
         StopInternal();
         _log.Dispose();
         base.OnClosed(e);

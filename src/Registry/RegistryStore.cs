@@ -25,6 +25,9 @@ public sealed class RegistryNode
     /// <summary>节点自报：是否允许被分发（对端心跳每次都会重报）。</summary>
     public bool Distributable { get; set; } = true;
 
+    /// <summary>节点自报：本机操作员已启动测试，愿意在全局会话开启后参与探测。</summary>
+    public bool TestReady { get; set; } = true;
+
     /// <summary>中心侧覆盖：勾掉后该节点对所有人隐身。写在中心侧，**不改对端配置**，
     /// 否则会被对端下一次心跳顶回来。</summary>
     public bool CenterHidden { get; set; }
@@ -43,14 +46,21 @@ public sealed class RegistryNode
     [JsonIgnore]
     public bool DuplicateSuspected { get; set; }
 
-    /// <summary>是否真正进入分发快照：节点自报与中心覆盖取交集。</summary>
+    /// <summary>节点的分发策略开关是否允许展示（不含运行/就绪状态）。</summary>
     [JsonIgnore]
     public bool IsDistributed => Distributable && !CenterHidden;
+
+    /// <summary>是否真正进入探测目标快照：在线、允许分发、中心未隐藏且本地已就绪。</summary>
+    [JsonIgnore]
+    public bool IsEligibleProbeTarget => Online && IsDistributed && TestReady;
 }
 
 public sealed class RegistryState
 {
     public ulong Revision { get; set; }
+
+    /// <summary>只有注册中心可切换的全局测试会话状态。</summary>
+    public bool GlobalTestRunning { get; set; }
     public List<RegistryNode> Nodes { get; set; } = new();
 
     /// <summary>
@@ -71,7 +81,7 @@ public sealed record RegistryUpsertResult(bool Accepted, string ErrorCode, strin
 /// <summary>
 /// 中心清单与 revision（规格 §5.6 / §7）。
 ///
-/// revision 规则：**只有"可分发相关状态真的变化"时才 +1**——纯心跳只刷新 lastSeen，不涨 rev，
+/// revision 规则：**只有影响控制状态或目标快照的状态真的变化时才 +1**——纯心跳只刷新 lastSeen，不涨 rev，
 /// 否则每个客户端每个心跳都要拉一次快照，白白放大流量。
 /// 快照语义下不需要墓碑：客户端每次拿到完整清单并整体替换，离线过的节点也不会复活已删链路。
 /// </summary>
@@ -105,6 +115,8 @@ public sealed class RegistryStore
     public string Path => _path;
 
     public ulong Revision => _state.Revision;
+
+    public bool GlobalTestRunning => _state.GlobalTestRunning;
 
     public IReadOnlyList<RegistryNode> Nodes => _state.Nodes;
 
@@ -193,6 +205,7 @@ public sealed class RegistryStore
             node.Udp != message.Udp ||
             node.Icmp != message.Icmp ||
             node.Distributable != message.Distributable ||
+            node.TestReady != message.TestReady ||
             !node.Ips.SequenceEqual(addresses, StringComparer.OrdinalIgnoreCase))
         {
             changed = true;
@@ -206,6 +219,7 @@ public sealed class RegistryStore
         node.Udp = message.Udp;
         node.Icmp = message.Icmp;
         node.Distributable = message.Distributable;
+        node.TestReady = message.TestReady;
         node.InstanceId = message.Instance;
         node.LastSeenUtc = now;
         node.Authenticated = authenticated;
@@ -272,6 +286,17 @@ public sealed class RegistryStore
         return true;
     }
 
+    /// <summary>由中心“启动/停止测试”切换；变化进入 revision，使所有客户端拿到新快照。</summary>
+    public bool SetGlobalTestRunning(bool running)
+    {
+        if (_state.GlobalTestRunning == running) return false;
+
+        _state.GlobalTestRunning = running;
+        _state.Revision++;
+        Save();
+        return true;
+    }
+
     /// <summary>刷新在线状态：超 TTL **只标记离线、不删除**（抖动/临时断网不该让链路从所有人清单里消失）。</summary>
     public bool RefreshOnlineState()
     {
@@ -296,10 +321,10 @@ public sealed class RegistryStore
         return changed;
     }
 
-    /// <summary>当前全部可分发节点的快照（含离线节点：临时离线不该导致链路被删）。</summary>
+    /// <summary>当前全部有效探测目标：必须在线、允许分发、未隐藏且已本地启动测试。</summary>
     public List<NodeSnapshot> BuildSnapshot()
         => _state.Nodes
-            .Where(n => n.IsDistributed)
+            .Where(n => n.IsEligibleProbeTarget)
             .OrderBy(n => n.Name, StringComparer.Ordinal)
             .ThenBy(n => n.NodeId, StringComparer.Ordinal)
             .Select(n => new NodeSnapshot
@@ -313,7 +338,8 @@ public sealed class RegistryStore
                 Tcp = n.Tcp,
                 Udp = n.Udp,
                 Icmp = n.Icmp,
-                Online = n.Online
+                Online = n.Online,
+                TestReady = n.TestReady
             })
             .ToList();
 

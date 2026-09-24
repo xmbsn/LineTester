@@ -160,6 +160,9 @@ public sealed class RegisterMessage
     public bool Icmp { get; set; }
 
     public bool Distributable { get; set; } = true;
+
+    /// <summary>本节点操作员是否已点击“启动测试”，即监听就绪并愿意成为探测目标。</summary>
+    public bool TestReady { get; set; } = true;
     public string Instance { get; set; } = "";
     public ulong Rev { get; set; }
 
@@ -230,6 +233,9 @@ public sealed class NodeSnapshot
 
     public bool Online { get; set; } = true;
 
+    /// <summary>节点已本地启动测试；快照通常只包含此值为 true 的节点。</summary>
+    public bool TestReady { get; set; } = true;
+
     /// <summary>全部外网地址（含主地址）；只有一个地址时可不带。</summary>
     public List<string>? Ips { get; set; }
 
@@ -279,6 +285,9 @@ public sealed class AckMessage
 
     /// <summary>中心建议的下次注册间隔（秒）；客户端只允许用它缩短间隔。</summary>
     public int ReannounceAfter { get; set; }
+
+    /// <summary>注册中心控制的全局测试会话是否运行中。</summary>
+    public bool GlobalTestRunning { get; set; }
 
     public SelfCheckInfo? SelfCheck { get; set; }
 

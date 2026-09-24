@@ -21,11 +21,12 @@ public sealed class RegistryNodeRow : INotifyPropertyChanged
     private readonly bool _distributable;
     private readonly bool _authenticated;
     private readonly bool _duplicateSuspected;
+    private readonly bool _testReady;
     private bool _centerHidden;
 
     private RegistryNodeRow(
         string nodeId, string name, string address, string protocols, string lastSeen,
-        bool online, bool distributable, bool authenticated, bool duplicateSuspected,
+        bool online, bool distributable, bool authenticated, bool duplicateSuspected, bool testReady,
         bool centerHidden, bool removed, Func<string, bool, bool> setCenterHidden,
         bool longOffline = false, string allAddresses = "")
     {
@@ -42,6 +43,7 @@ public sealed class RegistryNodeRow : INotifyPropertyChanged
         _distributable = distributable;
         _authenticated = authenticated;
         _duplicateSuspected = duplicateSuspected;
+        _testReady = testReady;
         _centerHidden = centerHidden;
         IsRemoved = removed;
         LongOffline = longOffline;
@@ -69,7 +71,7 @@ public sealed class RegistryNodeRow : INotifyPropertyChanged
             shown,
             RegistryUiText.DescribeProtocols(node.Tcp, node.Udp, node.Icmp),
             RegistryUiText.DescribeLastSeen(node.LastSeenUtc, nowUtc),
-            node.Online, node.Distributable, node.Authenticated, node.DuplicateSuspected, node.CenterHidden, false,
+            node.Online, node.Distributable, node.Authenticated, node.DuplicateSuspected, node.TestReady, node.CenterHidden, false,
             setCenterHidden,
             // 长期离线（>7 天没有心跳）：这些行往往已经不会再回来，却会让所有节点一直维持到它的链路。
             // 判据只看"多久没心跳"，不依赖 Online 标志——那个标志要等中心刷新才会更新。
@@ -80,7 +82,7 @@ public sealed class RegistryNodeRow : INotifyPropertyChanged
     /// <summary>已被中心移除、仍在移除名单里的节点。</summary>
     public static RegistryNodeRow FromRemoved(string nodeId, Func<string, bool, bool> setCenterHidden)
         => new(nodeId, nodeId, "-", "-", "-",
-            false, false, false, false, false, true, setCenterHidden);
+            false, false, false, false, false, false, true, setCenterHidden);
 
     public string NodeId { get; }
     public string Name { get; }
@@ -108,7 +110,7 @@ public sealed class RegistryNodeRow : INotifyPropertyChanged
 
     public string State => IsRemoved
         ? RegistryUiText.RemovedNodeState
-        : RegistryUiText.DescribeNodeState(_online, _distributable, _centerHidden, _authenticated, _duplicateSuspected);
+        : RegistryUiText.DescribeNodeState(_online, _distributable, _centerHidden, _authenticated, _duplicateSuspected, _testReady);
 
     /// <summary>是否参与分发（= 中心侧未隐藏）。写入失败（节点已被移除）时回滚显示。</summary>
     public bool Distributed

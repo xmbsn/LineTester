@@ -44,7 +44,7 @@ public sealed class ProbeClient
     /// </summary>
     public const int TrailerGraceMs = 120;
 
-    private const int MaxReplyBytes = 512;
+    private const int LegacyMaxReplyBytes = 512;
 
     private sealed record CacheEntry(IPAddress Address, DateTime ExpiresUtc);
 
@@ -52,7 +52,8 @@ public sealed class ProbeClient
     /// 执行一次探测。返回 null 表示“被调用方取消”，不属于丢包，不得计入统计或日志。
     /// </summary>
     public async Task<ProbeResult?> ProbeAsync(
-        LinkConfig link, string protocol, int timeoutMs, CancellationToken ct)
+        LinkConfig link, string protocol, int timeoutMs, CancellationToken ct,
+        int streamPacketMinBytes = 0, int streamPacketMaxBytes = 0)
     {
         var timestamp = DateTime.Now;
         var seq = NextSeq(link, protocol);
@@ -62,8 +63,13 @@ public sealed class ProbeClient
         // 序号让抓包（Wireshark 等）能直接读出这是第几个探测包，
         // 探测ID 让客户端能确认回包确实属于本次探测，
         // 末尾的 v2 表示“请把你看我的源地址一并回显”（老版本被动端会忽略它、原样回显）。
+        // ICMP 是控制报文，不属于远程串流数据路径；它继续用小包，避免影响系统 ping 行为。
+        // 直接调用 ProbeClient 的旧代码也保持 v2 小包兼容，只有界面传入范围时才启用串流模拟。
+        var useStreamPacket = protocol != ProtocolIcmp && streamPacketMinBytes > 0 && streamPacketMaxBytes > 0;
         var suffix = protocol == ProtocolIcmp ? IcmpPinger.PayloadSuffix : ObservedAddressRequest;
-        var payload = Encoding.UTF8.GetBytes($"{seq}|{probeId}{suffix}");
+        var payload = useStreamPacket
+            ? StreamPacket.Create(seq, probeId, streamPacketMinBytes, streamPacketMaxBytes)
+            : Encoding.UTF8.GetBytes($"{seq}|{probeId}{suffix}");
 
         try
         {
@@ -159,7 +165,7 @@ public sealed class ProbeClient
         var rtt = Stopwatch.StartNew();
         await stream.WriteAsync(payload, token).ConfigureAwait(false);
 
-        var buffer = new byte[MaxReplyBytes];
+        var buffer = new byte[payload.Length + 256];
         var read = 0;
         while (read < payload.Length)
         {

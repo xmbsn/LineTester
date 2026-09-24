@@ -17,11 +17,13 @@
 | 编号 | 可验证目标 |
 |---|---|
 | G1 | 每台客户端只填「本端外网地址/端口 + 注册中心地址/端口 + 密钥 + 名称」，不再手填其他机房 |
-| G2 | 各客户端自动获得「除自己以外的所有**可分发**节点」作为链路，协议按对端注册值生成 |
+| G2 | 各客户端自动获得「除自己以外的所有**有效探测目标**」作为链路，协议按对端注册值生成 |
+| G2a | 注册中心拥有唯一的**全局测试会话**开关；子节点只能声明本机是否**测试已就绪**，不能自行开启全局发包 |
+| G2b | 只有在线、可分发、未被中心隐藏且测试已就绪的节点才进入目标快照；停止或未启动的节点不会收到其他节点的测试包 |
 | G3 | 注册中心删除一个节点 → 其他客户端的该链路消失，**包括期间离线过的节点**（重新上线后也消失） |
-| G4 | 注册中心不可达时，探测**不中断**，使用上次同步到的清单继续测试 |
+| G4 | 注册中心短暂不可达时最多沿用 8 秒控制租约；租约到期必须停发，恢复后按中心状态续上 |
 | G5 | 本地手工链路永不被同步改写或删除 |
-| G6 | 与未升级的老版本客户端混跑，**不产生误判丢包** |
+| G6 | 注册帧与老版本保持可识别；严格的全局启停要求中心及全部子节点一并升级 |
 | G7 | 回环 / 未指定 / link-local 地址**绝不进入其他节点的链路清单** |
 
 ### 1.2 非目标（YAGNI，明确不做）
@@ -43,6 +45,8 @@
 | **注册中心**（center） | 承担注册服务角色的某**一个**节点（`Registrar.ServeAsCenter=true`）。**不是独立程序**：它就是 LineTester，复用同一监听端口 |
 | **清单**（registry） | 中心持有的节点集合 + 单调递增的 `revision` |
 | **可分发**（distributable） | 该节点允许自己被分发给其他节点、被其他节点探测 |
+| **测试已就绪**（testReady） | 本节点操作员已点击“启动测试”，愿意在全局会话开启后参与；它只是本地参与意图，不等于全局允许发包或当前已开放数据面回显 |
+| **全局测试会话**（globalTestRunning） | 注册中心拥有的唯一发包许可；只有它为 true 时，已就绪节点才发送探测 |
 | **注册来源链路** | 由同步自动生成/维护的 `Links[]` 条目（`Source=registry`） |
 | **本地链路** | 人工在链路编辑器里维护的条目（`Source=manual`） |
 | **探测**（probe） | 现有的 RTT/丢包测试报文（`序号\|探测ID\|v2`），与本协议共用端口 |
@@ -154,7 +158,7 @@
 
 - 原子写（复用 `ConfigManager` 的写临时文件再替换 + 退避重试做法）。
 - `revision` 一并持久化，保证单调（中心重启后不复用旧 rev）。
-- **不存墓碑**：客户端每次拿到的是"当前可分发清单的快照"，整体替换本地的注册链路 → 删除天然传播，离线节点重新上线也会消失（见 §9）。
+- **不存墓碑**：客户端每次拿到的是"当前有效探测目标的快照"，整体替换本地的注册链路 → 删除和退出测试天然传播（见 §9）。
 
 ---
 
@@ -220,6 +224,7 @@ LT1|<TYPE>|<MAC>|<rawPayload>\n
 | `tcp` / `udp` | 是 | **对外宣告的可被探测协议**（对应 `AdvertiseTcp`/`AdvertiseUdp`），决定别人链路的 `Tcp`/`Udp` |
 | `icmp` | 否 | 是否宣告"可被 ICMP(ping) 探测"（对应 `AdvertiseIcmp`）。缺省 false → 与老版本完全互通 |
 | `distributable` | 是 | 是否允许被分发给其他节点 |
+| `testReady` | 是 | 本节点是否已点击“启动测试”；false 时中心保留注册记录，但不把该节点放进目标快照 |
 | `instance` | 是 | 进程启动时随机生成；中心据此识别"对端重启过" |
 | `rev` | 是 | 客户端**已应用**的中心 revision；0 = 首次 |
 | `ts` / `nonce` / `mac` | 是 | 认证与防重放（§5.4） |
@@ -227,9 +232,9 @@ LT1|<TYPE>|<MAC>|<rawPayload>\n
 #### 5.3.2 `ACK`
 
 ```json
-{"reqId":"a1b2c3d4","rev":138,"changed":true,"reannounceAfter":180,
+{"reqId":"a1b2c3d4","rev":138,"changed":true,"reannounceAfter":180,"globalTestRunning":true,
  "selfCheck":{"seenIp":"198.51.100.7","seenPort":41234},
- "nodes":[{"nodeId":"…","name":"机房B","ip":"203.0.113.20","port":50002,"tcp":true,"udp":true,"icmp":false,"online":true,
+ "nodes":[{"nodeId":"…","name":"机房B","ip":"203.0.113.20","port":50002,"tcp":true,"udp":true,"icmp":false,"online":true,"testReady":true,
           "ips":["203.0.113.20","203.0.113.21"]}, …],
  "deleted":[]}
 ```
@@ -240,7 +245,8 @@ LT1|<TYPE>|<MAC>|<rawPayload>\n
 | `changed` | `false` 时表示"客户端的 rev 已是最新"，`nodes` 省略 → 响应极小（稳态 1 包） |
 | `reannounceAfter` | 中心建议的下次注册间隔（秒）。**只能把客户端的间隔调短**（下限 `HeartbeatSeconds`），不能用它把客户端拖长到超过配置值，见 §8.2 |
 | `selfCheck` | 中心**看到的请求源地址**，供客户端与手填的 `PublicHost:PublicPort` 对照提示（§6.3） |
-| `nodes` | 当 `changed=true`：**当前全部可分发节点**的快照（含中心自身，若可分发） |
+| `globalTestRunning` | 中心控制的全局测试会话状态；每个 ACK 都携带，即使 `changed=false` |
+| `nodes` | 当 `changed=true`：当前全部**有效探测目标**的快照（在线、可分发、未隐藏、测试已就绪） |
 | `deleted` | 保留字段，v1 恒为空数组（快照语义下不需要，见 §9） |
 
 #### 5.3.3 `PART` / `ACKP`
@@ -344,7 +350,7 @@ ACKP  {"xferId":"0a1b2c3d","bitmap":"7"}      // 每 bit 一个块，bit i = 第
 - `distributable=false` 的节点：**不进入任何客户端的链路清单**，但仍存在于中心清单里（中心界面可见、标灰）；其状态变化照常递增 `revision`，只是不出现在快照的 `nodes[]` 里。
   典型用途：注册中心那台机器、临时接进来只做排查的机器。
 - **中心侧覆盖开关 `centerHidden`**：中心界面每个节点有一个「分发」勾选框，写的是中心的 `centerHidden`，**不是**改对端配置。
-  生效规则：`实际分发 = 节点自报的 distributable && !centerHidden`。
+  目标资格：`online && testReady && distributable && !centerHidden`。
   之所以必须这样：节点每次心跳都会重报自己的 `distributable`，若中心直接改对端字段，下一个心跳就被覆盖回去了。用中心侧独立字段才可以"中心想让谁隐身就让谁隐身"，且无需动那台机器的配置。
 - 中心界面每个节点显示"分发状态"与原因（正常 / 回环 / 未指定 / 已关分发 / 中心已隐藏）。
 
@@ -360,12 +366,13 @@ ACKP  {"xferId":"0a1b2c3d","bitmap":"7"}      // 每 bit 一个块，bit i = 第
 ## 7. 中心状态与持久化
 
 ```text
-RegistryState { revision: ulong, nodes: map<nodeId, NodeRecord> }
-NodeRecord    { nodeId, name, ip, port, tcp, udp, distributable, centerHidden,
+RegistryState { revision: ulong, globalTestRunning: bool, nodes: map<nodeId, NodeRecord> }
+NodeRecord    { nodeId, name, ip, port, tcp, udp, distributable, testReady, centerHidden,
                 instanceId, firstSeenUtc, lastSeenUtc, online, authenticated }
 ```
 
-- `distributable` 来自节点自报；`centerHidden` 是中心侧覆盖（§6.2）；实际分发 = 两者与运算。
+- `distributable` 与 `testReady` 来自节点自报；`centerHidden` 是中心侧覆盖（§6.2）。
+- `globalTestRunning` 只允许中心本机的“启动/停止测试”修改；客户端不能通过 REG 改写。
 - 落盘 `registry.json`（§4.3），原子写；启动时载入；`revision` 继续单调。
 - **不做**：按变更打墓碑、每节点 rev、中心间联邦。只维护一份**移除名单**（§9.1）。
 
@@ -386,7 +393,7 @@ NodeRecord    { nodeId, name, ip, port, tcp, udp, distributable, centerHidden,
                 收到 ACK(changed=false)      → 无操作
                 收到 ACK(changed=true)       → 应用快照（§8.3）→ 保存配置文件
                 收到 ERR(loopback/…)         → 记录提示，继续心跳
-                超时/重传耗尽                 → 标记"中心不可达"，按退避继续（探测不受影响）
+                超时/重传耗尽                 → 标记"中心不可达"；控制租约满 8 秒后停止探测
 ```
 
 ### 8.2 周期策略
@@ -395,11 +402,12 @@ NodeRecord    { nodeId, name, ip, port, tcp, udp, distributable, centerHidden,
   - **心跳**：每 `HeartbeatSeconds` 发一次 `REG`（保活 + 顺带同步）。
   - **强制同步**：每 `SyncSeconds` 至少发一次 `REG`（即使心跳失败）。
 - `ACK.reannounceAfter` **只允许把间隔调短**（下限 `HeartbeatSeconds`）；中心不可用它把客户端拖到远超配置值。
+- 另有 **2 秒协调轮询**，只用于刷新 `globalTestRunning` 与目标就绪快照；每次成功回执续期 8 秒控制租约。
 
 ### 8.3 应用快照（关键语义：整体替换）
 
 ```text
-输入：ACK.nodes（当前全部可分发节点，含中心自身若可分发）、本地 nodeId
+输入：ACK.nodes（当前全部有效探测目标）、本地 nodeId
 1. 过滤掉 nodeId == 本机 nodeId 的条目（自己不进自己的链路）
 2. 客户端二次过滤不可用地址（回环/未指定/link-local）→ 计数并在状态栏提示"已跳过 N 个"
 3. 目标集合 target = { (nodeId, 地址) → LinkConfig }
@@ -488,7 +496,7 @@ NodeRecord    { nodeId, name, ip, port, tcp, udp, distributable, centerHidden,
 
 **早期设计**用"差值 + 墓碑 + 每节点 rev"，理由是"离线节点会复活已删链路"。改用**全量快照语义**后：
 
-- 客户端每次拿到的是**当前可分发清单的完整快照**，本地注册链路**整体替换** → 离线过的节点
+- 客户端每次拿到的是**当前有效探测目标的完整快照**，本地注册链路**整体替换** → 离线过的节点
   一次同步就拿到"不含被删节点"的快照，该链路消失。
 - 流量代价可控：无变化时 `changed=false`，稳态每个心跳**只有 1 个包**；仅在变更后才有一次（可能分块的）快照。
 - `deleted[]` 字段保留占位，v1 恒为空——**节点级删除靠 `removedNodeIds` + 快照缺席双重保证**。
@@ -503,7 +511,8 @@ NodeRecord    { nodeId, name, ip, port, tcp, udp, distributable, centerHidden,
 ### 10.1 节点离线（中心侧）
 
 - `lastSeenUtc` 超过 **TTL = 3 × HeartbeatSeconds**（默认 180s）→ `online=false`。
-- **只标记、不删除**：节点抖动或临时断网不应让它从所有人的清单里消失。revision 递增（界面要显示状态）。
+- `online=false` 或 `testReady=false` 的节点仍留在中心管理清单，但必须退出下发快照，防止继续向未监听节点发包。
+- **只标记、不删除中心记录**：节点仍显示在中心管理表，但会从各客户端的探测目标快照中退出。revision 递增。
 - 中心界面显示"在线 / 离线（已 N 分钟）"。
 - **判活必须有人触发**（实现期补充）：中心在组装 `ACK` 时（即每个 `REG`/`SYNC`）调用一次
   `RefreshOnlineState()`——这是唯一"总会有人来"的位置；界面每次刷新中心表时也调用一次，
@@ -511,7 +520,7 @@ NodeRecord    { nodeId, name, ip, port, tcp, udp, distributable, centerHidden,
 
 ### 10.2 中心不可达（客户端侧）
 
-- 探测**完全不受影响**（用的是上次同步到的清单）。
+- 最近一次中心回执形成 8 秒控制租约；租约有效期内短暂抖动不影响探测，超过 8 秒后自动停发。
 - 状态栏提示"注册中心不可达（已 N 分钟，退避中）"。
 - 退避：`RetryMs` 起步，指数增长到 **30 × RetryMs** 封顶，恢复成功后退回基础值。
 
@@ -592,9 +601,11 @@ NodeRecord    { nodeId, name, ip, port, tcp, udp, distributable, centerHidden,
 | 新探测 → 老节点 | 与现在一致（老服务端原样回显） | 正常 |
 | 老探测 → **新**节点 | 新服务端判定非 `LT1|` → 走原探测回显路径 | 正常（老客户端逐字节比对通过） |
 | 老客户端 | 新中心 | 老客户端不发注册消息 → 中心的清单里没有它（除非手工登记），其余节点测不到它；**不报错、不误判** |
+| 协调功能上线前的注册客户端 | 新中心 | 缺少 `testReady` 时按 true 兼容注册，但旧客户端不会遵守 `globalTestRunning`；只能过渡观察，不能保证统一启停 |
 
 > 兼容性由"前缀分流"保证：只有以 `LT1|` 开头的报文才进入注册路径，
 > 探测回显路径一个字节都没改（T14 逐行复核）。
+> 要启用本节新增的严格协调语义，必须先升级中心，再升级全部子节点。
 
 ---
 
@@ -605,7 +616,7 @@ NodeRecord    { nodeId, name, ip, port, tcp, udp, distributable, centerHidden,
 | A1 | 三个节点只需各填「自己 + 中心」→ 每个节点自动出现另外 2 条链路；协议与对端注册值一致 |
 | A2 | 中心删除节点 B → A 与 C 的 B 链路在 ≤ `SyncSeconds`（默认 300s，现场可调 60s）内消失 |
 | A3 | A 在删除期间离线，A 重新上线 → A 的 B 链路**也消失** |
-| A4 | 关掉中心进程 → A/C 的探测与统计**不中断**，状态栏提示不可达；中心恢复后自动续上 |
+| A4 | 关掉中心进程 → A/C 在最近回执 8 秒租约到期后停止发包；中心恢复且全局会话仍为运行中时自动续上 |
 | A5 | A 手工加的链路在任意次同步后**依然存在**，内容不变 |
 | A6 | A 把某条注册链路 TCP/UDP 都取消勾选 → 之后每次同步仍保持"不发包"（本地停测不被覆盖） |
 | A7 | 把某节点 `PublicHost` 设为 `127.0.0.1` → **该节点的注册被中心拒绝**（`ERR loopback`），其他节点不会出现该链路；节点自己的「注册中心」页状态区同时标红提示"回环地址不可分发"（地址填错在**发起端**就能看见，不用去中心翻表） |
@@ -626,7 +637,7 @@ NodeRecord    { nodeId, name, ip, port, tcp, udp, distributable, centerHidden,
 | A1 | `TestRegistryEndToEndAsync`：A 只为"自己 + 中心"配置即自动出现 B 的链路，地址/端口/来源/`NodeId` 全部来自对端注册值 |
 | A2 | 同用例：中心 `RemoveNode("b")` → A 下一次同步后 B 的链路消失 |
 | A3 | `TestRegistryAcceptanceAsync`：A 下线 → 中心移除 B → A **重连（全新客户端）** 后同样没有 B 的链路（全量快照语义，不复活已删链路） |
-| A4 | `TestRegistryEndToEndAsync` 的探测断言 + `TestRegistryUiText` 的"不可达（已 N 分钟，退避中）"文案（中心不可达时探测与统计不受影响） |
+| A4 | `TestRegistryEndToEndAsync` 的全局启停与控制租约断言 + `TestRegistryUiText` 的“不可达”文案（中心失联满 8 秒后安全停发） |
 | A5 | `TestRegistrySync`（手工链路原样保留）+ `TestRegistryMainWindowUi`（多次同步后手工链路仍在且名称不变） |
 | A6 | `TestRegistryMainWindowUi`：注册链路 TCP/UDP 都取消勾选 → `LocalDisabled=true` 并落盘；再同步一次（对端改名，确认真动了这一行）仍保持不发包 |
 | A7 | `TestRegistryMainWindowUi`（快照里的回环节点被跳过）+ `TestRegistryUiText`（节点侧红色提示） |
@@ -647,7 +658,7 @@ NodeRecord    { nodeId, name, ip, port, tcp, udp, distributable, centerHidden,
 |---|---|
 | 纯逻辑 | 帧编解码与非法帧、HMAC（含对原始文本计算）、`ts`/`nonce` 防重放、分块切分与位图合并、快照应用到清单的 7 步规则、TTL 与 rev 递增规则 |
 | 中心 | 真实 UDP 回环：注册→ACK、重复 `reqId` 幂等（rev 不重复递增）、`changed=false` 短路、限流、错误码（loopback/unspecified/linklocal/auth/unsupported/throttled/internal）；节点疑似重复身份（`instance` 跳变）只标记不阻断 |
-| 端到端 | 同进程起 3 个 `ProbeServer`（不同端口），其一为中心；真实 `REG`/`SYNC`；断言链路自动生成、中心删除后其他节点消失、**离线节点重连后消失**、中心不可达时探测不受影响 |
+| 端到端 | 同进程起 3 个 `ProbeServer`（不同端口），其一为中心；真实 `REG`/`SYNC`；断言全局启停、节点就绪退出/恢复、探测门关闭时控制面仍可用、中心删除传播与安全租约 |
 | 兼容 | 老式纯回显服务端收到 `LT1|` → 本方 `unsupported` 且无丢包记录；老式探测包进新服务端 → 走回显 |
 | 界面 | 设置页字段往返保存、`selfCheck` 比对提示、`AdvertiseTcp/Udp` 影响生成的链路、注册链路只读、删除提示文案、节点清单表渲染、`centerHidden` 勾选后链路消失、来源列 |
 
@@ -672,7 +683,7 @@ NodeRecord    { nodeId, name, ip, port, tcp, udp, distributable, centerHidden,
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| 中心单点 | 只影响新增/删除可见性 | G4 离线可用；中心可选任意一台，切换只需改各节点的 `CenterHost` |
+| 中心单点 | 中心失联 8 秒后所有升级节点安全停发 | 中心可选稳定节点；控制面每 2 秒轮询，恢复后按持久化全局状态自动续上 |
 | UDP 分块被中间设备限速/丢包 | 首次全量同步变慢 | 块间隔 8ms + 位图重传 + 60s 超时重来；稳态只需 1 包 |
 | `PublicHost` 填错 | 其他节点全部测不通 | `selfCheck` 交叉核对提示；中心界面显示每个节点的地址，删错/填错一眼可见 |
 | 密钥硬编码/弱密钥 | 可被伪造注册或恶意删除 | 未配置密钥时中心界面标红；HMAC 不上线密钥；文档要求定期轮换 |

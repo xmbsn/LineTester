@@ -33,6 +33,14 @@ internal static partial class Program
             return Failures.Count == 0 ? 0 : 1;
         }
 
+        // 聚焦验证真实 TCP/UDP 回环与被动 UDP 审计；排查日志关联功能时无需等待全量自检。
+        if (args.Length == 1 && args[0] == "--probes")
+        {
+            await TestProbesAsync();
+            Console.WriteLine($"通过 {_pass}，失败 {Failures.Count}");
+            return Failures.Count == 0 ? 0 : 1;
+        }
+
         // 用真接口跑一次运营商查询（人工排查用：确认这台机器能不能访问 ip-api）
         if (args.Length >= 2 && args[0] == "--isp-live")
         {
@@ -143,6 +151,14 @@ internal static partial class Program
     // ---------------- 断言辅助 ----------------
 
     private static void Section(string title) => Console.WriteLine("\n# " + title);
+
+    /// <summary>被动 UDP 审计允许运行时读取；测试也必须允许日志写入者继续持有写句柄。</summary>
+    private static string[] ReadAllLinesShared(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        using var reader = new StreamReader(stream, Encoding.UTF8);
+        return reader.ReadToEnd().Split(["\r\n", "\n"], StringSplitOptions.RemoveEmptyEntries);
+    }
 
     private static void Check(string name, bool ok, string? detail = null)
     {
@@ -352,6 +368,8 @@ internal static partial class Program
             Eq("新增字段默认连续丢包阈值", 3, fresh.ConsecutiveLossWarn);
             Eq("新增字段默认勾选 TCP", true, fresh.EnableTcp);
             Eq("新增字段默认勾选 UDP", true, fresh.EnableUdp);
+            Eq("新增字段默认串流包下限", StreamPacket.DefaultMinBytes, fresh.StreamPacketMinBytes);
+            Eq("新增字段默认串流包上限", StreamPacket.DefaultMaxBytes, fresh.StreamPacketMaxBytes);
             Eq("Registrar 段默认不启用（升级后行为不变）", false, fresh.Registrar.Enabled);
             Eq("Registrar 默认心跳周期", 60, fresh.Registrar.HeartbeatSeconds);
             Eq("Registrar 默认同步周期", 300, fresh.Registrar.SyncSeconds);
@@ -362,6 +380,13 @@ internal static partial class Program
             Eq("链路默认未停测", false, fresh.Links[0].LocalDisabled);
             Check("未启用注册时，空 Registrar 字段不影响校验",
                 ConfigManager.Validate(new AppConfig { Links = new List<LinkConfig>() }, out _));
+            Check("串流包下限不能大于上限",
+                !ConfigManager.Validate(new AppConfig
+                {
+                    StreamPacketMinBytes = StreamPacket.DefaultMaxBytes,
+                    StreamPacketMaxBytes = StreamPacket.DefaultMinBytes,
+                    Links = new List<LinkConfig>()
+                }, out _));
 
             fresh.Links = new List<LinkConfig> { new() { Name = "机房B", Host = "10.1.1.1", Port = 9001 } };
             fresh.LossWarnPercent = 0.5;
@@ -402,7 +427,7 @@ internal static partial class Program
                 var expectedTop = new[]
                 {
                     "ConsecutiveLossWarn", "EnableIcmp", "EnableTcp", "EnableUdp", "IntervalMs", "Isp", "Links", "ListenPort",
-                    "LossWarnPercent", "Registrar", "StatWindowMinutes", "TimeoutMs", "WarningRttMs"
+                    "LossWarnPercent", "Registrar", "StatWindowMinutes", "StreamPacketMaxBytes", "StreamPacketMinBytes", "TimeoutMs", "WarningRttMs"
                 };
                 Check("顶层字段与配置契约完全一致（无派生字段泄漏）",
                     actualTop.SequenceEqual(expectedTop), string.Join(",", actualTop));
@@ -420,6 +445,8 @@ internal static partial class Program
             Eq("小数阈值往返保留", 0.5, reloaded.LossWarnPercent);
             Eq("协议开关往返保留（UDP 关闭）", false, reloaded.EnableUdp);
             Eq("协议开关往返保留（TCP 开启）", true, reloaded.EnableTcp);
+            Eq("串流包下限往返保留", StreamPacket.DefaultMinBytes, reloaded.StreamPacketMinBytes);
+            Eq("串流包上限往返保留", StreamPacket.DefaultMaxBytes, reloaded.StreamPacketMaxBytes);
             Eq("链路数量往返保留", 1, reloaded.Links.Count);
 
             Eq("Registrar 启用状态往返保留", true, reloaded.Registrar.Enabled);
@@ -596,7 +623,9 @@ internal static partial class Program
         Section("ProbeClient / ProbeServer（真实回环端到端）");
 
         var port = FindBindablePort();
-        var server = new ProbeServer(port);
+        var auditDirectory = Path.Combine(AppContext.BaseDirectory, ".testtmp", "udp_passive_audit");
+        try { if (Directory.Exists(auditDirectory)) Directory.Delete(auditDirectory, true); } catch { }
+        var server = new ProbeServer(port, auditDirectory);
 
         try
         {
@@ -624,6 +653,37 @@ internal static partial class Program
             var udp = await client.ProbeAsync(link, "UDP", 1000, CancellationToken.None);
             Check("UDP 探测成功", udp is { Lost: false }, udp?.Info);
             Check("UDP 记录到 RTT", udp?.RttMs is >= 0, udp?.RttMs?.ToString());
+            Check("UDP 被动审计已落盘", await server.WaitForUdpAuditIdleAsync(TimeSpan.FromSeconds(5)));
+            var auditPath = Path.Combine(auditDirectory, DateTime.Now.ToString("yyyy-MM-dd"), PassiveUdpAuditLog.FileName);
+            Check("UDP 被动审计文件已生成", File.Exists(auditPath), auditPath);
+            var auditLines = File.Exists(auditPath) ? ReadAllLinesShared(auditPath) : Array.Empty<string>();
+            Check("UDP 被动审计含关联字段与回包结论",
+                auditLines.Length >= 2 && auditLines[0] == PassiveUdpAuditLog.Header &&
+                udp is not null && auditLines.Skip(1).Any(x => x.Contains(udp.ProbeId, StringComparison.Ordinal) && x.Contains(",1,1,")),
+                auditLines.Length > 1 ? auditLines[^1] : "无审计行");
+
+            // 串流模拟包：固定范围时必须按指定总长度发包；TCP 还要能跨 Read 分段完整回显。
+            var streamTcp = await client.ProbeAsync(link, "TCP", 1000, CancellationToken.None, 1200, 1200);
+            var streamUdp = await client.ProbeAsync(link, "UDP", 1000, CancellationToken.None, 1200, 1200);
+            Check("1200B 串流模拟 TCP 探测成功", streamTcp is { Lost: false }, streamTcp?.Info);
+            Check("1200B 串流模拟 UDP 探测成功", streamUdp is { Lost: false }, streamUdp?.Info);
+
+            var streamBytes = StreamPacket.Create(42, "3f2a9c1d4b5e6f708192a3b4c5d6e7f8", 900, 1200);
+            Check("串流模拟包长度落在设定范围", streamBytes.Length is >= 900 and <= 1200, streamBytes.Length.ToString());
+            Check("串流模拟包声明的总长度与实际一致",
+                StreamPacket.TryGetExpectedLength(streamBytes, out var declaredSize) && declaredSize == streamBytes.Length,
+                $"声明={declaredSize} 实际={streamBytes.Length}");
+            Check("串流模拟包带 LT3 关联头", Encoding.ASCII.GetString(streamBytes, 0, 4) == "LT3|", "头不符");
+            var fifthBar = -1;
+            var bars = 0;
+            for (var i = 0; i < streamBytes.Length; i++)
+            {
+                if (streamBytes[i] != (byte)'|') continue;
+                if (++bars == 5) { fifthBar = i; break; }
+            }
+            Check("串流模拟负载以视频分片起始码开头",
+                fifthBar >= 0 && streamBytes.AsSpan(fifthBar + 1, 5).SequenceEqual(new byte[] { 0, 0, 0, 1, 0x41 }),
+                $"负载起点={fifthBar + 1}");
 
             // 主机名解析（IPv4 优先）也应命中双栈监听
             var byName = await client.ProbeAsync(
@@ -976,6 +1036,7 @@ internal static partial class Program
         finally
         {
             server.Dispose();
+            try { if (Directory.Exists(auditDirectory)) Directory.Delete(auditDirectory, true); } catch { }
         }
     }
 
