@@ -16,6 +16,9 @@ public sealed class RegistryClientOptions
     /// <summary>本端全部外网地址（含主地址）；多于一个时会随注册一起下发。</summary>
     public List<string> Ips { get; set; } = new();
 
+    /// <summary>本端全部可达端点；兼容字段 Ips 供旧中心使用。</summary>
+    public List<ExternalEndpoint> Endpoints { get; set; } = new();
+
     /// <summary>对外宣告"可被探测的协议"（对应 AdvertiseTcp/AdvertiseUdp/AdvertiseIcmp）。</summary>
     public bool Tcp { get; set; } = true;
 
@@ -272,6 +275,11 @@ public sealed class RegistryClient : IDisposable
             Port = _options.PublicPort,
             // 多地址才带：单地址时保持与老中心/老客户端完全一致的报文
             Ips = _options.Ips.Count > 1 ? _options.Ips.ToList() : null,
+            // 所有端点共用主端口时沿用旧版 Ips 报文；只有端口确实不同时才发送新字段。
+            Endpoints = _options.Endpoints.Count > 0 &&
+                        _options.Endpoints.Any(endpoint => endpoint.Port != _options.PublicPort)
+                ? _options.Endpoints.Select(endpoint => new ExternalEndpoint { Ip = endpoint.Ip, Port = endpoint.Port }).ToList()
+                : null,
             Tcp = _options.Tcp,
             Udp = _options.Udp,
             Icmp = _options.Icmp,

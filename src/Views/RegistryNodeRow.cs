@@ -52,18 +52,18 @@ public sealed class RegistryNodeRow : INotifyPropertyChanged
     /// <param name="setCenterHidden">参数为 (nodeId, hidden)，返回是否真的改动了中心清单。</param>
     public static RegistryNodeRow FromNode(RegistryNode node, DateTime nowUtc, Func<string, bool, bool> setCenterHidden)
     {
-        var addresses = node.Ips is { Count: > 0 }
-            ? node.Ips
-            : new List<string> { node.Ip };
+        var endpoints = node.AllEndpoints;
+        if (endpoints.Count == 0 && !string.IsNullOrWhiteSpace(node.Ip))
+            endpoints.Add(new ExternalEndpoint { Ip = node.Ip, Port = node.Port });
 
         // 一个机房多个外网 IP 时，**必须都显示出来**——曾经只显示主地址，
         // 现场看到的就成了"我注册了 3 个 IP，中心界面只有 1 个"。
-        var primary = string.IsNullOrWhiteSpace(node.Ip) ? "（未提供，不分发）" : $"{node.Ip}:{node.Port}";
-        var shown = addresses.Count > 1
-            ? $"{primary}  等 {addresses.Count} 个"
+        var primary = endpoints.Count == 0 ? "（未提供，不分发）" : $"{endpoints[0].Ip}:{endpoints[0].Port}";
+        var shown = endpoints.Count > 1
+            ? $"{primary}  等 {endpoints.Count} 个"
             : primary;
 
-        var all = string.Join("、", addresses.Select(ip => $"{ip}:{node.Port}"));
+        var all = string.Join("、", endpoints.Select(endpoint => $"{endpoint.Ip}:{endpoint.Port}"));
 
         return new RegistryNodeRow(
             node.NodeId,

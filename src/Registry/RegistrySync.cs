@@ -38,7 +38,7 @@ public static class RegistrySync
                 continue;
             }
 
-            if (!RegistryAddressRules.IsDistributable(node.Ip))
+            if (node.AllEndpoints.Count == 0 || node.AllEndpoints.Any(endpoint => !RegistryAddressRules.IsDistributable(endpoint.Ip)))
             {
                 skipped++;
                 continue;
@@ -67,12 +67,16 @@ public static class RegistrySync
 
         foreach (var node in targets)
         {
-            var baseName = string.IsNullOrWhiteSpace(node.Name) ? $"{node.Ip}:{node.Port}" : node.Name.Trim();
-            var addresses = node.AllIps.Count > 0 ? node.AllIps : new List<string> { node.Ip };
+            var endpoints = node.AllEndpoints;
+            var firstEndpoint = endpoints.FirstOrDefault();
+            var baseName = string.IsNullOrWhiteSpace(node.Name)
+                ? $"{firstEndpoint?.Ip ?? node.Ip}:{firstEndpoint?.Port ?? node.Port}"
+                : node.Name.Trim();
 
-            for (var i = 0; i < addresses.Count; i++)
+            for (var i = 0; i < endpoints.Count; i++)
             {
-                var ip = addresses[i];
+                var endpoint = endpoints[i];
+                var ip = endpoint.Ip;
 
                 // 主地址用节点名，其余加 #2/#3 后缀：既能在统计表里区分，又能一眼看出是同一个机房
                 var name = i == 0 ? baseName : $"{baseName}#{i + 1}";
@@ -103,7 +107,7 @@ public static class RegistrySync
                     added++;
                 }
                 else if (current.Name != name ||
-                         current.Port != node.Port ||
+                         current.Port != endpoint.Port ||
                          current.Tcp != tcp ||
                          current.Udp != udp ||
                          current.Icmp != icmp)
@@ -116,7 +120,7 @@ public static class RegistrySync
                 {
                     Name = name,
                     Host = ip,
-                    Port = node.Port,
+                    Port = endpoint.Port,
                     Tcp = tcp,
                     Udp = udp,
                     Icmp = icmp,

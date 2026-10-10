@@ -128,14 +128,15 @@ public sealed class RegistryCenterService
 
         if (string.IsNullOrWhiteSpace(message.NodeId)) return BadRequest(message.ReqId, "缺少 nodeId");
 
-        var addresses = message.AllIps;
+        var endpoints = message.AllEndpoints;
+        var addresses = endpoints.Select(endpoint => $"{endpoint.Ip}:{endpoint.Port}").ToList();
         var beforeRevision = _store.Revision;
 
         var result = _store.Upsert(message, UsesSecret);
         if (!result.Accepted)
         {
-            _log?.Write($"REG 被拒 nodeId={Short(message.NodeId)} name={message.Name} 地址=[{string.Join(",", addresses)}] " +
-                        $"port={message.Port} tcp={message.Tcp} udp={message.Udp} icmp={message.Icmp} → {result.ErrorCode}：{result.ErrorMessage}");
+            _log?.Write($"REG 被拒 nodeId={Short(message.NodeId)} name={message.Name} 端点=[{string.Join(",", addresses)}] " +
+                    $"tcp={message.Tcp} udp={message.Udp} icmp={message.Icmp} → {result.ErrorCode}：{result.ErrorMessage}");
 
             return Reply(new ErrorMessage
             {
@@ -146,9 +147,9 @@ public sealed class RegistryCenterService
         }
 
         _log?.Write($"REG 成功 nodeId={Short(message.NodeId)} name={message.Name} " +
-                    $"地址=[{string.Join(",", addresses)}] port={message.Port} tcp={message.Tcp} udp={message.Udp} icmp={message.Icmp} " +
+                    $"端点=[{string.Join(",", addresses)}] tcp={message.Tcp} udp={message.Udp} icmp={message.Icmp} " +
                     $"distributable={message.Distributable} testReady={message.TestReady} rev {beforeRevision}→{_store.Revision} 清单 {_store.Nodes.Count} 个节点" +
-                    (message.Distributable && addresses.Count > 1 ? $"（多地址：会给每个地址各生成一条链路）" : ""));
+                    (message.Distributable && addresses.Count > 1 ? $"（多端点：会给每个 IP/端口各生成一条链路）" : ""));
 
         var replies = BuildAck(message.ReqId, message.Rev, remote);
         CacheReply(message.ReqId, replies);

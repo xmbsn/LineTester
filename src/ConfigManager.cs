@@ -227,6 +227,17 @@ public static class ConfigManager
                 if (!Registry.RegistryAddressRules.IsDistributable(value, out _, out var reason))
                     problems.Add($"Registrar.PublicHosts 里的 {value} 不可分发：{reason}");
             }
+
+            foreach (var endpoint in registrar.AdditionalEndpoints ?? new List<Registry.ExternalEndpoint>())
+            {
+                var value = endpoint.Ip?.Trim() ?? "";
+                if (value.Length > 0 && !Registry.RegistryAddressRules.IsDistributable(value, out _, out var reason))
+                {
+                    problems.Add($"Registrar.AdditionalEndpoints 里的 {value} 不可分发：{reason}");
+                }
+                if (endpoint.Port < 1 || endpoint.Port > 65535)
+                    problems.Add($"Registrar.AdditionalEndpoints[{value}].Port 必须在 1~65535 之间（当前是 {endpoint.Port}）");
+            }
         }
         else if (registrar.PublicPort != 0 && (registrar.PublicPort < 1 || registrar.PublicPort > 65535))
         {

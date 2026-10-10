@@ -16,6 +16,9 @@ public sealed class RegistryNode
 
     /// <summary>该节点的全部外网地址（含主地址；同一机房多个出口 IP 时会有多条）。</summary>
     public List<string> Ips { get; set; } = new();
+
+    /// <summary>完整外网端点；空时兼容旧 registry.json 的 Ips + Port。</summary>
+    public List<ExternalEndpoint> Endpoints { get; set; } = new();
     public int Port { get; set; }
     public bool Tcp { get; set; }
     public bool Udp { get; set; }
@@ -53,6 +56,28 @@ public sealed class RegistryNode
     /// <summary>是否真正进入探测目标快照：在线、允许分发、中心未隐藏且本地已就绪。</summary>
     [JsonIgnore]
     public bool IsEligibleProbeTarget => Online && IsDistributed && TestReady;
+
+    [JsonIgnore]
+    public List<ExternalEndpoint> AllEndpoints
+    {
+        get
+        {
+            var source = Endpoints is { Count: > 0 }
+                ? Endpoints
+                : (Ips is { Count: > 0 } ? Ips : new List<string> { Ip })
+                    .Select(ip => new ExternalEndpoint { Ip = ip, Port = Port }).ToList();
+            var result = new List<ExternalEndpoint>();
+            foreach (var endpoint in source)
+            {
+                var ip = endpoint.Ip?.Trim() ?? "";
+                if (ip.Length == 0 || endpoint.Port is < 1 or > 65535) continue;
+                if (!result.Any(existing => existing.Port == endpoint.Port &&
+                    string.Equals(existing.Ip, ip, StringComparison.OrdinalIgnoreCase)))
+                    result.Add(new ExternalEndpoint { Ip = ip, Port = endpoint.Port });
+            }
+            return result;
+        }
+    }
 }
 
 public sealed class RegistryState
@@ -167,13 +192,41 @@ public sealed class RegistryStore
         // 地址检查只针对**会被分发出去**的节点：它没有可被访问的地址，别人就会去连错地址。
         // 自报 Distributable=false 的节点（只想测别人、不需要被别人测）不会被分发，
         // 因此允许地址留空或填回环——否则"纯客户端"根本注册不上，也就测不了别人。
-        var addresses = message.AllIps;
+        var endpoints = message.AllEndpoints;
         if (message.Distributable)
         {
-            foreach (var address in addresses)
+            if (message.Port is < 1 or > 65535)
+                return RegistryUpsertResult.Rejected(RegistryErrorCodes.BadRequest,
+                    $"主外网端口必须在 1~65535 之间（当前是 {message.Port}）");
+            if (!RegistryAddressRules.IsDistributable(message.Ip, out var primaryCode, out var primaryReason))
+                return RegistryUpsertResult.Rejected(primaryCode, $"{message.Ip}：{primaryReason}");
+
+            if (message.Endpoints is { Count: > 0 })
             {
-                if (!RegistryAddressRules.IsDistributable(address, out var code, out var text))
-                    return RegistryUpsertResult.Rejected(code, $"{address}：{text}");
+                var seenIps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var endpoint in message.Endpoints)
+                {
+                    var ip = endpoint.Ip?.Trim() ?? "";
+                    if (ip.Length == 0)
+                        return RegistryUpsertResult.Rejected(RegistryErrorCodes.BadRequest, "外网端点 IP 不能为空");
+                    if (!seenIps.Add(ip))
+                        return RegistryUpsertResult.Rejected(RegistryErrorCodes.BadRequest, $"外网端点 IP {ip} 重复");
+                    if (endpoint.Port is < 1 or > 65535)
+                        return RegistryUpsertResult.Rejected(RegistryErrorCodes.BadRequest,
+                            $"{ip} 的外网端口必须在 1~65535 之间");
+                    if (!RegistryAddressRules.IsDistributable(ip, out var code, out var reason))
+                        return RegistryUpsertResult.Rejected(code, $"{ip}：{reason}");
+                }
+            }
+
+            if (endpoints.Count == 0)
+                return RegistryUpsertResult.Rejected(RegistryErrorCodes.BadRequest,
+                    "至少需要一个有效的 IP 与端口外网端点");
+
+            foreach (var endpoint in endpoints)
+            {
+                if (!RegistryAddressRules.IsDistributable(endpoint.Ip, out var code, out var text))
+                    return RegistryUpsertResult.Rejected(code, $"{endpoint.Ip}：{text}");
             }
         }
 
@@ -206,14 +259,16 @@ public sealed class RegistryStore
             node.Icmp != message.Icmp ||
             node.Distributable != message.Distributable ||
             node.TestReady != message.TestReady ||
-            !node.Ips.SequenceEqual(addresses, StringComparer.OrdinalIgnoreCase))
+            !node.AllEndpoints.Select(endpoint => $"{endpoint.Ip}|{endpoint.Port}")
+                .SequenceEqual(endpoints.Select(endpoint => $"{endpoint.Ip}|{endpoint.Port}"), StringComparer.OrdinalIgnoreCase))
         {
             changed = true;
         }
 
         node.Name = message.Name;
         node.Ip = message.Ip;
-        node.Ips = addresses;
+        node.Endpoints = endpoints;
+        node.Ips = endpoints.Select(endpoint => endpoint.Ip).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         node.Port = message.Port;
         node.Tcp = message.Tcp;
         node.Udp = message.Udp;
@@ -339,7 +394,10 @@ public sealed class RegistryStore
                 Udp = n.Udp,
                 Icmp = n.Icmp,
                 Online = n.Online,
-                TestReady = n.TestReady
+                TestReady = n.TestReady,
+                Endpoints = n.AllEndpoints.Any(endpoint => endpoint.Port != n.Port)
+                    ? n.AllEndpoints.Select(endpoint => new ExternalEndpoint { Ip = endpoint.Ip, Port = endpoint.Port }).ToList()
+                    : null
             })
             .ToList();
 

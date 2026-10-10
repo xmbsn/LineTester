@@ -27,13 +27,23 @@ public sealed class RegistrarDraft
     /// <summary>其余外网地址（同一机房多个出口 IP）。</summary>
     public List<string> PublicHosts { get; set; } = new();
 
+    /// <summary>其余外网端点；旧配置里的 PublicHosts 会按本端主端口迁移。</summary>
+    public List<ExternalEndpointDraft> AdditionalEndpoints { get; set; } = new();
+
+    private IEnumerable<ExternalEndpointDraft> EffectiveAdditionalEndpoints
+        => AdditionalEndpoints.Count > 0
+            ? AdditionalEndpoints
+            : PublicHosts.Select(host => new ExternalEndpointDraft(host, PublicPortText));
+
     /// <summary>全部对外地址（主地址在前，去重）。</summary>
     public List<string> AllPublicHosts
     {
         get
         {
             var list = new List<string>(4);
-            foreach (var host in new[] { PublicHost }.Concat(PublicHosts))
+            foreach (var host in new[] { PublicHost }
+                .Concat(EffectiveAdditionalEndpoints.Select(endpoint => endpoint.Ip))
+                .Concat(PublicHosts))
             {
                 var value = host?.Trim() ?? "";
                 if (value.Length > 0 && !list.Contains(value, StringComparer.OrdinalIgnoreCase)) list.Add(value);
@@ -68,6 +78,14 @@ public sealed class RegistrarDraft
         PublicHost = config.PublicHost,
         PublicHosts = config.PublicHosts?.Where(h => !string.IsNullOrWhiteSpace(h)).Select(h => h.Trim()).ToList() ?? new List<string>(),
         PublicPortText = config.PublicPort > 0 ? config.PublicPort.ToString(CultureInfo.InvariantCulture) : "",
+        AdditionalEndpoints = (config.AdditionalEndpoints is { Count: > 0 }
+                ? config.AdditionalEndpoints
+                : (config.PublicHosts ?? new List<string>())
+                    .Select(host => new ExternalEndpoint { Ip = host, Port = config.PublicPort }).ToList())
+            .Where(endpoint => !string.IsNullOrWhiteSpace(endpoint.Ip))
+            .Select(endpoint => new ExternalEndpointDraft(endpoint.Ip.Trim(),
+                endpoint.Port > 0 ? endpoint.Port.ToString(CultureInfo.InvariantCulture) : ""))
+            .ToList(),
         Distributable = config.Distributable,
         AdvertiseTcp = config.AdvertiseTcp,
         AdvertiseUdp = config.AdvertiseUdp,
@@ -94,9 +112,17 @@ public sealed class RegistrarDraft
         config.Enabled = Enabled;
         config.ServeAsCenter = ServeAsCenter;
         config.NodeName = NodeName.Trim();
-        var hosts = AllPublicHosts;
-        config.PublicHost = hosts.Count > 0 ? hosts[0] : "";
-        config.PublicHosts = hosts.Count > 1 ? hosts.Skip(1).ToList() : new List<string>();
+        config.PublicHost = PublicHost.Trim();
+        var endpoints = EffectiveAdditionalEndpoints.ToList();
+        config.PublicHosts = endpoints
+            .Where(endpoint => !string.IsNullOrWhiteSpace(endpoint.Ip))
+            .Select(endpoint => endpoint.Ip.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        config.AdditionalEndpoints = endpoints
+            .Where(endpoint => !string.IsNullOrWhiteSpace(endpoint.Ip))
+            .Select(endpoint => new ExternalEndpoint { Ip = endpoint.Ip.Trim(), Port = ParseInt(endpoint.PortText) })
+            .ToList();
         config.PublicPort = ParseInt(PublicPortText);
         config.Distributable = Distributable;
         config.AdvertiseTcp = AdvertiseTcp;
@@ -153,6 +179,7 @@ public sealed class RegistrarDraft
 
             var portProblem = DescribePortProblem("本端外网端口", PublicPortText);
             if (portProblem.Length > 0) problems.Add(portProblem);
+            ValidateAdditionalEndpoints(problems, required: true);
         }
         else if (AllPublicHosts.Count > 0 || !string.IsNullOrWhiteSpace(PublicPortText))
         {
@@ -165,6 +192,7 @@ public sealed class RegistrarDraft
 
             var portProblem = DescribePortProblem("本端外网端口", PublicPortText, required: false);
             if (portProblem.Length > 0) problems.Add(portProblem);
+            ValidateAdditionalEndpoints(problems, required: false);
         }
 
         var centerHostProblem = DescribeHostProblem("注册中心地址", CenterHost, required: false);
@@ -188,6 +216,27 @@ public sealed class RegistrarDraft
             problems.Add($"最大重传次数必须是 0~{RegistrarConfig.MaxRetriesLimit} 的整数（当前填写的是“{Text(MaxRetriesText)}”）");
 
         return string.Join("；", problems);
+    }
+
+    private void ValidateAdditionalEndpoints(List<string> problems, bool required)
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var primary = PublicHost?.Trim() ?? "";
+        if (primary.Length > 0) seen.Add(primary);
+        foreach (var endpoint in EffectiveAdditionalEndpoints)
+        {
+            var ip = endpoint.Ip?.Trim() ?? "";
+            if (ip.Length == 0 && string.IsNullOrWhiteSpace(endpoint.PortText)) continue;
+
+            var hostProblem = DescribeHostProblem("已添加外网地址", ip, required);
+            if (hostProblem.Length > 0) problems.Add(hostProblem);
+
+            var portProblem = DescribePortProblem($"外网地址 {ip} 的端口", endpoint.PortText, required);
+            if (portProblem.Length > 0) problems.Add(portProblem);
+
+            if (ip.Length > 0 && !seen.Add(ip))
+                problems.Add($"外网地址 {ip} 重复；一个 IP 只能添加一次");
+        }
     }
 
     /// <summary>
@@ -285,4 +334,19 @@ public sealed class RegistrarDraft
         if (!int.TryParse(text?.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var value)) return false;
         return value >= min && value <= max;
     }
+}
+
+/// <summary>注册页外网地址列表中的可编辑行。</summary>
+public sealed class ExternalEndpointDraft
+{
+    public ExternalEndpointDraft() { }
+
+    public ExternalEndpointDraft(string ip, string portText)
+    {
+        Ip = ip;
+        PortText = portText;
+    }
+
+    public string Ip { get; set; } = "";
+    public string PortText { get; set; } = "";
 }

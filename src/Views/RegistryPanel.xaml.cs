@@ -4,6 +4,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using LineTester.Registry;
 
 namespace LineTester.Views;
@@ -30,11 +31,14 @@ public partial class RegistryPanel : UserControl
     }
 
     private readonly ObservableCollection<RegistryNodeRow> _nodeRows = new();
+    private readonly ObservableCollection<ExternalEndpointDraft> _endpointRows = new();
 
     private RegistryStore? _store;
     private ulong _shownRevision = ulong.MaxValue;
     private DateTime _lastCenterRefreshUtc = DateTime.MinValue;
     private bool _syncingSecret;
+    private bool _loading;
+    private readonly DispatcherTimer _endpointAutoSaveTimer = new() { Interval = TimeSpan.FromMilliseconds(600) };
 
     /// <summary>界面上显示的节点身份：读回配置时必须带上它，否则每次保存都会换一个身份。</summary>
     private string _nodeId = "";
@@ -45,6 +49,14 @@ public partial class RegistryPanel : UserControl
 
         // 两个中心表的行集合由本页持有：主窗口只把 store 递进来
         NodeGrid.ItemsSource = _nodeRows;
+        PublicEndpointsGrid.ItemsSource = _endpointRows;
+        PublicHostBox.LostKeyboardFocus += (_, _) => ScheduleEndpointAutoSave();
+        PublicPortBox.LostKeyboardFocus += (_, _) => ScheduleEndpointAutoSave();
+        _endpointAutoSaveTimer.Tick += (_, _) =>
+        {
+            _endpointAutoSaveTimer.Stop();
+            if (!_loading) EndpointEditCommitted?.Invoke();
+        };
 
         SecretBox.PasswordChanged += (_, _) => SyncSecret(fromPasswordBox: true);
         SecretTextBox.TextChanged += (_, _) => SyncSecret(fromPasswordBox: false);
@@ -63,6 +75,9 @@ public partial class RegistryPanel : UserControl
 
     /// <summary>点「保存配置」：交给主窗口统一校验并落盘（与窗口底部按钮同一条路径）。</summary>
     public event Action? SaveRequested;
+
+    /// <summary>本端外网端点编辑完成后，请求主窗口保存配置并立即重新注册。</summary>
+    public event Action? EndpointEditCommitted;
 
     /// <summary>点「立即注册 / 立即同步」。</summary>
     public event Action? RegisterRequested;
@@ -90,6 +105,7 @@ public partial class RegistryPanel : UserControl
     /// <summary>把配置填进界面（窗口启动、重新加载配置时调用）。</summary>
     public void Load(RegistrarConfig config)
     {
+        _loading = true;
         var draft = RegistrarDraft.From(config);
 
         EnabledCheck.IsChecked = draft.Enabled;
@@ -101,10 +117,11 @@ public partial class RegistryPanel : UserControl
 
         NodeNameBox.Text = draft.NodeName;
 
-        // 地址列表：主地址 + 其余；输入框默认填主地址
-        var hosts = draft.AllPublicHosts;
-        PublicHostBox.Text = hosts.Count > 0 ? hosts[0] : "";
-        RefreshPublicHostsList(hosts);
+        // 主端点由上方字段编辑，其余端点在表格中逐行维护 IP 与端口。
+        PublicHostBox.Text = draft.PublicHost;
+        _endpointRows.Clear();
+        foreach (var endpoint in draft.AdditionalEndpoints)
+            _endpointRows.Add(new ExternalEndpointDraft(endpoint.Ip, endpoint.PortText));
 
         PublicPortBox.Text = draft.PublicPortText;
         CenterHostBox.Text = draft.CenterHost;
@@ -122,6 +139,7 @@ public partial class RegistryPanel : UserControl
             : draft.NodeId;
 
         _nodeId = draft.NodeId;
+        _loading = false;
     }
 
     /// <summary>读界面到配置。校验不通过返回 false 且不改动配置（避免写回"改了一半"的值）。</summary>
@@ -141,17 +159,15 @@ public partial class RegistryPanel : UserControl
 
         draft.NodeName = NodeNameBox.Text;
 
-        // 地址列表（第一个是主地址）；列表为空时退化为用输入框里的值
-        var hosts = CurrentPublicHosts();
-        if (hosts.Count == 0 && PublicHostBox.Text.Trim().Length > 0) hosts.Add(PublicHostBox.Text.Trim());
-
-        // 输入框里有内容但还没点「添加」→ 视为要一起生效，避免"填了却没保存"
-        var typed = PublicHostBox.Text.Trim();
-        if (typed.Length > 0 && !hosts.Contains(typed, StringComparer.OrdinalIgnoreCase)) hosts.Add(typed);
-
-        draft.PublicHost = hosts.Count > 0 ? hosts[0] : "";
-        draft.PublicHosts = hosts.Count > 1 ? hosts.Skip(1).ToList() : new List<string>();
+        draft.PublicHost = PublicHostBox.Text.Trim();
         draft.PublicPortText = PublicPortBox.Text;
+        draft.AdditionalEndpoints = _endpointRows
+            .Select(endpoint => new ExternalEndpointDraft(endpoint.Ip, endpoint.PortText))
+            .ToList();
+        draft.PublicHosts = draft.AdditionalEndpoints
+            .Where(endpoint => !string.IsNullOrWhiteSpace(endpoint.Ip))
+            .Select(endpoint => endpoint.Ip.Trim())
+            .ToList();
         draft.CenterHost = CenterHostBox.Text;
         draft.CenterPortText = CenterPortBox.Text;
         draft.HeartbeatText = HeartbeatBox.Text;
@@ -171,66 +187,38 @@ public partial class RegistryPanel : UserControl
 
     // ---------------- 外网地址列表（一机房多 IP） ----------------
 
-    /// <summary>把地址列表刷到界面上（第一行标"（主）"）。</summary>
-    private void RefreshPublicHostsList(IEnumerable<string> hosts)
-    {
-        PublicHostsList.Items.Clear();
-
-        var index = 0;
-        foreach (var host in hosts)
-        {
-            var value = host?.Trim() ?? "";
-            if (value.Length == 0) continue;
-
-            PublicHostsList.Items.Add(index == 0 ? value + "（主）" : value);
-            index++;
-        }
-    }
-
-    private List<string> CurrentPublicHosts()
-        => PublicHostsList.Items
-            .Cast<string>()
-            .Select(item => item.Replace("（主）", "").Trim())
-            .Where(item => item.Length > 0)
-            .ToList();
-
     private void AddPublicHost_Click(object sender, RoutedEventArgs e)
     {
-        var value = PublicHostBox.Text.Trim();
-        if (value.Length == 0)
-        {
-            Alert("请先在上面的「本端外网地址」里填一个地址，再点添加。", "添加外网地址");
-            return;
-        }
-
-        var hosts = CurrentPublicHosts();
-        if (hosts.Contains(value, StringComparer.OrdinalIgnoreCase))
-        {
-            Alert($"「{value}」已经在列表里了。", "添加外网地址");
-            return;
-        }
-
-        hosts.Add(value);
-        RefreshPublicHostsList(hosts);
-        PublicHostBox.Text = hosts[0];
+        var endpoint = new ExternalEndpointDraft();
+        _endpointRows.Add(endpoint);
+        PublicEndpointsGrid.SelectedItem = endpoint;
+        PublicEndpointsGrid.ScrollIntoView(endpoint);
+        if (PublicEndpointsGrid.Columns.Count > 0)
+            PublicEndpointsGrid.CurrentCell = new DataGridCellInfo(endpoint, PublicEndpointsGrid.Columns[0]);
+        PublicEndpointsGrid.BeginEdit();
     }
 
     private void RemovePublicHost_Click(object sender, RoutedEventArgs e)
     {
-        var selected = PublicHostsList.SelectedItems.Cast<string>().ToList();
+        var selected = PublicEndpointsGrid.SelectedItems.Cast<ExternalEndpointDraft>().ToList();
         if (selected.Count == 0)
         {
-            Alert("请先在列表里选中要删除的地址。", "删除外网地址");
+            Alert("请先在列表里选中要删除的端点。", "删除外网端点");
             return;
         }
 
-        var removed = selected
-            .Select(item => item.Replace("（主）", "").Trim())
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var endpoint in selected) _endpointRows.Remove(endpoint);
+        EndpointEditCommitted?.Invoke();
+    }
 
-        var hosts = CurrentPublicHosts().Where(host => !removed.Contains(host)).ToList();
-        RefreshPublicHostsList(hosts);
-        if (hosts.Count > 0) PublicHostBox.Text = hosts[0];
+    private void EndpointEditor_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+        => ScheduleEndpointAutoSave();
+
+    private void ScheduleEndpointAutoSave()
+    {
+        if (_loading) return;
+        _endpointAutoSaveTimer.Stop();
+        _endpointAutoSaveTimer.Start();
     }
 
     // ---------------- 状态显示 ----------------

@@ -86,6 +86,21 @@
                 </Setter.Value>
             </Setter>
         </Style>
+
+        <Style x:Key="EndpointEditor" TargetType="TextBox">
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Padding" Value="5,2"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="ToolTip" Value="可直接点击并修改；离开输入框后自动保存并上报中心"/>
+            <Style.Triggers>
+                <Trigger Property="IsKeyboardFocused" Value="True">
+                    <Setter Property="BorderThickness" Value="1"/>
+                    <Setter Property="BorderBrush" Value="#4285F4"/>
+                    <Setter Property="Background" Value="#F8FBFF"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
     </UserControl.Resources>
 
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
@@ -139,7 +154,7 @@
                     <TextBlock Style="{StaticResource RegHint}"
                                Text="「本端外网地址 + 本端外网端口」= 其他节点连本机用的地址与端口（机房映射进来的那一个，例如 203.0.113.9:16298），必须手工填写：出方向 NAT 的源端口与入方向映射端口通常不同，程序无法从“中心看到的源地址”自动推断。它与「注册中心地址/端口」是两回事。若本机只想测别人、不需要被别人测，可取消勾选「参与网状」，这两项就可以留空。"/>
 
-                    <!-- 同一机房多个外网 IP：其他节点会为每个地址各生成一条链路 -->
+                    <!-- 同一机房额外外网端点：IP 与映射端口可以独立修改 -->
                     <Grid Margin="0,8,0,0">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
@@ -147,22 +162,46 @@
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
 
-                        <TextBlock Grid.Column="0" Style="{StaticResource RegLabel}" Text="已添加的外网地址"/>
+                        <TextBlock Grid.Column="0" Style="{StaticResource RegLabel}" Text="已添加的外网端点"/>
                         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Top">
-                            <ListBox x:Name="PublicHostsList" Width="260" Height="56" SelectionMode="Extended"
-                                     FontFamily="Consolas, monospace"
-                                     ToolTip="同一机房有多个外网 IP 时，把每个 IP 都加进来（端口同一个）；其他节点会为每个地址各生成一条链路"/>
+                            <DataGrid x:Name="PublicEndpointsGrid" Width="390" Height="88" MinHeight="56"
+                                      AutoGenerateColumns="False" IsReadOnly="False" CanUserAddRows="False" CanUserDeleteRows="False"
+                                      CanUserResizeRows="False" SelectionUnit="FullRow" SelectionMode="Extended"
+                                      RowHeight="28" HeadersVisibility="Column" Background="White"
+                                      BorderBrush="#DADCE0" BorderThickness="1"
+                                      ToolTip="可直接点击 IP 或端口输入框修改；离开输入框后自动保存并上报中心">
+                                <DataGrid.Columns>
+                                    <DataGridTemplateColumn Header="外网 IP" Width="*">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBox Text="{Binding Ip, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                         Style="{StaticResource EndpointEditor}"
+                                                         LostKeyboardFocus="EndpointEditor_LostKeyboardFocus"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                    <DataGridTemplateColumn Header="端口" Width="90">
+                                        <DataGridTemplateColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBox Text="{Binding PortText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                         Style="{StaticResource EndpointEditor}"
+                                                         LostKeyboardFocus="EndpointEditor_LostKeyboardFocus"/>
+                                            </DataTemplate>
+                                        </DataGridTemplateColumn.CellTemplate>
+                                    </DataGridTemplateColumn>
+                                </DataGrid.Columns>
+                            </DataGrid>
                             <StackPanel Orientation="Horizontal" Margin="8,0,0,0">
                                 <Button x:Name="AddPublicHostButton" Style="{StaticResource RegButton}"
-                                        Content="添加" Click="AddPublicHost_Click" MinWidth="56" Padding="8,4"
-                                        ToolTip="把左侧“本端外网地址”里填的地址加入列表"/>
+                                        Content="添加端点" Click="AddPublicHost_Click" MinWidth="72" Padding="8,4"
+                                        ToolTip="添加一行，然后填写独立的 IP 与映射端口"/>
                                 <Button x:Name="RemovePublicHostButton" Style="{StaticResource RegButton}"
                                         Content="删除所选" Click="RemovePublicHost_Click" MinWidth="72" Padding="8,4"
-                                        ToolTip="从列表里移除选中的地址"/>
+                                        ToolTip="从列表里移除选中的端点"/>
                             </StackPanel>
                         </StackPanel>
                         <TextBlock Grid.Column="2" Style="{StaticResource RegHint}" Margin="10,0,0,0"
-                                   Text="第一行是主地址；其余地址在对方生成的链路名里会带 #2、#3 后缀。&#10;端口对所有地址共用。"/>
+                                   Text="直接点击 IP 或端口即可修改，离开输入框后自动保存并上报注册中心；中心同步后，其他测试端会按新地址和端口探测。&#10;添加新端点后，在新行中填写 IP 和映射端口。"/>
                     </Grid>
 
                     <StackPanel Orientation="Horizontal" Margin="0,10,0,0">

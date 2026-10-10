@@ -13,8 +13,12 @@ A node whose operator has locally selected “Start test” and which is prepare
 _Avoid_: Online node, registered node, active link
 
 **Eligible probe target**:
-A ready, online, distributable node that is included in the registry snapshot for other nodes.
+A ready, online, distributable node whose advertised endpoints are included in the registry snapshot for other nodes.
 _Avoid_: Registered node, visible node
+
+**External endpoint**:
+A public IP address and mapped port pair that other nodes use to reach one test node. A node may advertise several external endpoints, each with its own port.
+_Avoid_: Public IP list, shared node port
 
 **Registered node**:
 A node known to the registry center. Registration alone does not mean the node is ready to receive probes or allowed to send them.

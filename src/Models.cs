@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
+using LineTester.Registry;
 
 namespace LineTester;
 
@@ -125,10 +126,13 @@ public sealed class RegistrarConfig
     public string PublicHost { get; set; } = "";
 
     /// <summary>
-    /// 本端其余外网地址（不含主地址；端口相同）。
-    /// 一个机房可能有多个出口 IP（例如东莞机房有 3 个），其他节点会为每个地址各生成一条链路。
+    /// 本端其余外网地址（不含主地址；旧配置兼容字段）。
+    /// 新配置使用 <see cref="AdditionalEndpoints"/> 为每个 IP 单独指定映射端口。
     /// </summary>
     public List<string> PublicHosts { get; set; } = new();
+
+    /// <summary>额外外网端点（兼容旧版 PublicHosts：未提供时按 PublicPort 补齐端口）。</summary>
+    public List<ExternalEndpoint> AdditionalEndpoints { get; set; } = new();
 
     /// <summary>本端对外端口（机房映射的那个）。</summary>
     public int PublicPort { get; set; }

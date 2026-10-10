@@ -143,6 +143,13 @@ public static class RegistryErrorCodes
     public const string Internal = "internal";
 }
 
+/// <summary>一个可被其他测试端访问的外网端点。</summary>
+public sealed class ExternalEndpoint
+{
+    public string Ip { get; set; } = "";
+    public int Port { get; set; }
+}
+
 public sealed class RegisterMessage
 {
     public string ReqId { get; set; } = "";
@@ -167,16 +174,19 @@ public sealed class RegisterMessage
     public ulong Rev { get; set; }
 
     /// <summary>
-    /// 本节点的**全部**外网地址（含主地址，端口相同）。同一机房有多个出口 IP 时用得上。
+    /// 兼容字段：本节点的全部外网 IP（含主地址，端口使用主字段 Port）。
     /// 只有一个地址时可以不带（老中心会忽略这个字段，仍按 <see cref="Ip"/> 处理）。
     /// </summary>
     public List<string>? Ips { get; set; }
+
+    /// <summary>完整外网端点列表；缺省时使用旧版 Ip/Ips + Port 字段。</summary>
+    public List<ExternalEndpoint>? Endpoints { get; set; }
 
     public long Ts { get; set; }
     public string Nonce { get; set; } = "";
     public string Mac { get; set; } = "";
 
-    /// <summary>有效地址列表：带了 Ips 就用它，否则退化为单个 Ip。</summary>
+    /// <summary>有效 IP 列表：带了 Ips 就用它，否则退化为单个 Ip。</summary>
     [JsonIgnore]
     public List<string> AllIps
     {
@@ -200,6 +210,35 @@ public sealed class RegisterMessage
                 list.Insert(0, primary);
             }
 
+            return list;
+        }
+    }
+
+    /// <summary>兼容旧报文并保证主端点排第一。</summary>
+    [JsonIgnore]
+    public List<ExternalEndpoint> AllEndpoints
+    {
+        get
+        {
+            var source = Endpoints is { Count: > 0 }
+                ? Endpoints
+                : AllIps.Select(ip => new ExternalEndpoint { Ip = ip, Port = Port }).ToList();
+            var list = new List<ExternalEndpoint>(source.Count);
+            foreach (var endpoint in source)
+            {
+                var ip = endpoint.Ip?.Trim() ?? "";
+                if (ip.Length == 0 || endpoint.Port is < 1 or > 65535) continue;
+                if (!list.Any(existing => existing.Port == endpoint.Port &&
+                    string.Equals(existing.Ip, ip, StringComparison.OrdinalIgnoreCase)))
+                    list.Add(new ExternalEndpoint { Ip = ip, Port = endpoint.Port });
+            }
+
+            var primary = Ip?.Trim() ?? "";
+            if (primary.Length > 0 && Port is >= 1 and <= 65535)
+            {
+                list.RemoveAll(item => string.Equals(item.Ip, primary, StringComparison.OrdinalIgnoreCase));
+                list.Insert(0, new ExternalEndpoint { Ip = primary, Port = Port });
+            }
             return list;
         }
     }
@@ -236,8 +275,11 @@ public sealed class NodeSnapshot
     /// <summary>节点已本地启动测试；快照通常只包含此值为 true 的节点。</summary>
     public bool TestReady { get; set; } = true;
 
-    /// <summary>全部外网地址（含主地址）；只有一个地址时可不带。</summary>
+    /// <summary>兼容字段：全部外网 IP（含主地址）；只有一个地址时可不带。</summary>
     public List<string>? Ips { get; set; }
+
+    /// <summary>完整外网端点；缺省时按兼容字段 Ips + Port 生成。</summary>
+    public List<ExternalEndpoint>? Endpoints { get; set; }
 
     /// <summary>有效地址列表：带了 Ips 就用它，否则退化为单个 Ip。</summary>
     [JsonIgnore]
@@ -264,6 +306,23 @@ public sealed class NodeSnapshot
             }
 
             return list;
+        }
+    }
+
+
+    [JsonIgnore]
+    public List<ExternalEndpoint> AllEndpoints
+    {
+        get
+        {
+            if (Endpoints is { Count: > 0 })
+                return Endpoints
+                    .Where(endpoint => !string.IsNullOrWhiteSpace(endpoint.Ip) && endpoint.Port is >= 1 and <= 65535)
+                    .GroupBy(endpoint => $"{endpoint.Ip.Trim()}|{endpoint.Port}", StringComparer.OrdinalIgnoreCase)
+                    .Select(group => new ExternalEndpoint { Ip = group.First().Ip.Trim(), Port = group.First().Port })
+                    .ToList();
+
+            return AllIps.Select(ip => new ExternalEndpoint { Ip = ip, Port = Port }).ToList();
         }
     }
 }

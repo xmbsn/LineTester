@@ -159,6 +159,7 @@ public partial class MainWindow : Window
 
         // 注册中心页：校验与落盘仍走主窗口这一条路径，页内只负责显示与即时操作
         RegistryTabPanel.SaveRequested += () => SaveConfig_Click(this, new RoutedEventArgs());
+        RegistryTabPanel.EndpointEditCommitted += () => SaveConfig_Click(this, new RoutedEventArgs());
         RegistryTabPanel.RegisterRequested += OnRegistryRegisterRequested;
         RegistryTabPanel.CenterChanged += OnRegistryCenterChanged;
         RegistryTabPanel.NodeNameChanged += UpdateNodeNameDisplay;
@@ -1121,6 +1122,19 @@ public partial class MainWindow : Window
                 .Select(h => h.Trim())
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList(),
+            Endpoints = new[]
+                {
+                    new ExternalEndpoint { Ip = _settings.Registrar.PublicHost, Port = _settings.Registrar.PublicPort }
+                }
+                .Concat((_settings.Registrar.AdditionalEndpoints is { Count: > 0 }
+                        ? _settings.Registrar.AdditionalEndpoints
+                        : (_settings.Registrar.PublicHosts ?? new List<string>())
+                            .Select(host => new ExternalEndpoint { Ip = host, Port = _settings.Registrar.PublicPort }).ToList())
+                    .Select(endpoint => new ExternalEndpoint { Ip = endpoint.Ip, Port = endpoint.Port }))
+                .Where(endpoint => !string.IsNullOrWhiteSpace(endpoint.Ip) && endpoint.Port is >= 1 and <= 65535)
+                .GroupBy(endpoint => endpoint.Ip.Trim(), StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First())
+                .ToList(),
             Tcp = _settings.Registrar.AdvertiseTcp,
             Udp = _settings.Registrar.AdvertiseUdp,
             Icmp = _settings.Registrar.AdvertiseIcmp,
@@ -1164,6 +1178,8 @@ public partial class MainWindow : Window
         return string.Join("|",
             r.NodeId, r.NodeName, r.PublicHost, r.PublicPort.ToString(),
             string.Join(",", r.PublicHosts ?? new List<string>()),
+            string.Join(",", (r.AdditionalEndpoints ?? new List<ExternalEndpoint>())
+                .Select(endpoint => $"{endpoint.Ip.Trim()}:{endpoint.Port}")),
             r.AdvertiseTcp.ToString(), r.AdvertiseUdp.ToString(), r.AdvertiseIcmp.ToString(), r.Distributable.ToString(),
             r.CenterHost, r.CenterPort.ToString(), r.Secret,
             r.HeartbeatSeconds.ToString(), r.SyncSeconds.ToString(),
