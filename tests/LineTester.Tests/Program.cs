@@ -366,6 +366,9 @@ internal static partial class Program
             Eq("默认监听端口", 8800, fresh.ListenPort);
             Eq("新增字段默认丢包率阈值", 1.0, fresh.LossWarnPercent);
             Eq("新增字段默认连续丢包阈值", 3, fresh.ConsecutiveLossWarn);
+            Eq("默认探测并发上限", 64, fresh.MaxConcurrentProbes);
+            Eq("默认永久保留日志", 0, fresh.LogRetentionDays);
+            Eq("运营商查询默认关闭", false, fresh.Isp.Enabled);
             Eq("新增字段默认勾选 TCP", true, fresh.EnableTcp);
             Eq("新增字段默认勾选 UDP", true, fresh.EnableUdp);
             Eq("新增字段默认串流包下限", StreamPacket.DefaultMinBytes, fresh.StreamPacketMinBytes);
@@ -427,7 +430,7 @@ internal static partial class Program
                 var expectedTop = new[]
                 {
                     "ConsecutiveLossWarn", "EnableIcmp", "EnableTcp", "EnableUdp", "IntervalMs", "Isp", "Links", "ListenPort",
-                    "LossWarnPercent", "Registrar", "StatWindowMinutes", "StreamPacketMaxBytes", "StreamPacketMinBytes", "TimeoutMs", "WarningRttMs"
+                    "LogRetentionDays", "LossWarnPercent", "MaxConcurrentProbes", "Registrar", "StatWindowMinutes", "StreamPacketMaxBytes", "StreamPacketMinBytes", "TimeoutMs", "WarningRttMs"
                 };
                 Check("顶层字段与配置契约完全一致（无派生字段泄漏）",
                     actualTop.SequenceEqual(expectedTop), string.Join(",", actualTop));
@@ -503,6 +506,14 @@ internal static partial class Program
                 !ConfigManager.Validate(new AppConfig { ListenPort = 0 }, out _));
             Check("测试间隔过小被拒绝",
                 !ConfigManager.Validate(new AppConfig { IntervalMs = 10 }, out _));
+            Check("探测并发上限不能为 0",
+                !ConfigManager.Validate(new AppConfig { MaxConcurrentProbes = 0 }, out _));
+            Check("日志保留天数不能为负",
+                !ConfigManager.Validate(new AppConfig { LogRetentionDays = -1 }, out _));
+            fresh.Registrar.Secret = "";
+            Check("启用注册时空密钥被拒绝", !ConfigManager.Validate(fresh, out var secretError) &&
+                secretError.Contains("Registrar.Secret"), secretError);
+            fresh.Registrar.Secret = "s3cret";
             Check("链路端口越界被拒绝",
                 !ConfigManager.Validate(
                     new AppConfig { Links = { new LinkConfig { Name = "A", Host = "h", Port = 70000 } } }, out _));
@@ -612,6 +623,16 @@ internal static partial class Program
             Path.GetFullPath(hostilePath).StartsWith(Path.GetFullPath(dir) + Path.DirectorySeparatorChar,
                 StringComparison.OrdinalIgnoreCase),
             hostilePath);
+
+        var retentionRoot = Path.Combine(dir, "retention-test");
+        foreach (var name in new[] { "2026-09-19", "2026-09-20", "2026-09-21", "misc" })
+            Directory.CreateDirectory(Path.Combine(retentionRoot, name));
+        Eq("保留两天时仅清理过期日期目录", 1,
+            LogRetention.Cleanup(retentionRoot, 2, new DateTime(2026, 9, 21)));
+        Check("昨天、今天及非日期目录保留",
+            Directory.Exists(Path.Combine(retentionRoot, "2026-09-20")) &&
+            Directory.Exists(Path.Combine(retentionRoot, "2026-09-21")) &&
+            Directory.Exists(Path.Combine(retentionRoot, "misc")));
 
         try { Directory.Delete(dir, true); } catch { }
     }
@@ -1426,7 +1447,8 @@ internal static partial class Program
                 PublicHost = "203.0.113.9",
                 PublicPort = 16298,
                 CenterHost = "203.0.113.1",
-                CenterPort = 16298
+                CenterPort = 16298,
+                Secret = "render-secret"
             },
             Links =
             {

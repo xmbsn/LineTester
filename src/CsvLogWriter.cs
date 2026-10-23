@@ -7,40 +7,49 @@ namespace LineTester;
 /// <summary>
 /// 后台 CSV 日志写入器。
 ///
-/// 结果进入无界通道后由单个后台任务顺序落盘，按批 Flush，
+/// 结果进入有界通道后由单个后台任务顺序落盘，按批 Flush，
 /// 文件保持打开因而不会每条都产生系统调用，也不会阻塞界面。
 ///
 /// 日志**按天滚动**：写入 <c>logs\YYYY-MM-DD\&lt;链路&gt;_&lt;IP&gt;_&lt;端口&gt;.csv</c>。
 /// 同一天内持续追加；一旦写入的日期变化（跨天），会先把上一天落盘并关闭其文件句柄，
 /// 避免长期无人值守运行时句柄无限累积。
-/// 历史日志只追加、永不删除（与“清除”无关）。
+/// 默认永久保留历史日志；启用保留期后只清理过期的日期目录（与“清除”无关）。
 /// </summary>
 public sealed class CsvLogWriter : IDisposable
 {
+    public const int MaxPendingResults = 65536;
+    private const int MaxWriteBatch = 1024;
     public const string Header =
         "timestamp,peer_ip,peer_port,protocol,rtt_ms,packet_loss,setup_ms,seq,probe_id,seen_from,failure";
 
     private readonly string _rootDirectory;
     private readonly Channel<ProbeResult> _channel;
     private readonly Task _worker;
+    private readonly object _retentionGate = new();
     private readonly Dictionary<string, StreamWriter> _writers = new(StringComparer.OrdinalIgnoreCase);
     private DateTime _activeDate = DateTime.MinValue;
     private int _pendingCount;
+    private long _droppedCount;
+    private int _retentionDays;
     private string? _lastError;
     private bool _disposed;
 
     public CsvLogWriter(string directory)
     {
         _rootDirectory = directory;
-        _channel = Channel.CreateUnbounded<ProbeResult>(new UnboundedChannelOptions
+        _channel = Channel.CreateBounded<ProbeResult>(new BoundedChannelOptions(MaxPendingResults)
         {
             SingleReader = true,
-            SingleWriter = false
+            SingleWriter = false,
+            FullMode = BoundedChannelFullMode.Wait
         });
         _worker = Task.Run(WorkerLoopAsync);
     }
 
     public string? LastError => _lastError;
+
+    /// <summary>磁盘持续写不动导致缓冲区满时被拒收的结果数。</summary>
+    public long DroppedCount => Interlocked.Read(ref _droppedCount);
 
     /// <summary>当前打开的日志文件数（按天滚动后会回落，用于确认句柄没有无限累积）。</summary>
     public int OpenFileCount => _writers.Count;
@@ -50,10 +59,28 @@ public sealed class CsvLogWriter : IDisposable
 
     public event Action<string>? ErrorOccurred;
 
-    public void Enqueue(ProbeResult result)
+    /// <summary>设置日志保留天数，并在后台立即清理一次；0 表示不清理。</summary>
+    public void ConfigureRetention(int keepDays)
     {
-        if (_disposed) return;
-        if (_channel.Writer.TryWrite(result)) Interlocked.Increment(ref _pendingCount);
+        Volatile.Write(ref _retentionDays, keepDays);
+        if (keepDays <= 0) return;
+        _ = Task.Run(() =>
+        {
+            try { lock (_retentionGate) LogRetention.Cleanup(_rootDirectory, keepDays, DateTime.Today); }
+            catch (Exception ex) { Report(ex); }
+        });
+    }
+
+    public bool Enqueue(ProbeResult result)
+    {
+        if (_disposed) return false;
+        // 先加计数再入队，避免后台线程先取走结果导致计数短暂变负。
+        Interlocked.Increment(ref _pendingCount);
+        if (_channel.Writer.TryWrite(result)) return true;
+        Interlocked.Decrement(ref _pendingCount);
+        if (Interlocked.Increment(ref _droppedCount) == 1)
+            Report(new IOException($"CSV 日志缓冲区已满（{MaxPendingResults} 条），部分结果未落盘；请检查磁盘速度或空间。"));
+        return false;
     }
 
     /// <summary>
@@ -107,7 +134,7 @@ public sealed class CsvLogWriter : IDisposable
         while (await reader.WaitToReadAsync().ConfigureAwait(false))
         {
             var batch = new List<ProbeResult>();
-            while (reader.TryRead(out var result)) batch.Add(result);
+            while (batch.Count < MaxWriteBatch && reader.TryRead(out var result)) batch.Add(result);
             if (batch.Count == 0) continue;
 
             foreach (var result in batch)
@@ -140,6 +167,12 @@ public sealed class CsvLogWriter : IDisposable
             FlushAll();
             CloseAll();
             _activeDate = date;
+            var keepDays = Volatile.Read(ref _retentionDays);
+            if (keepDays > 0)
+            {
+                try { lock (_retentionGate) LogRetention.Cleanup(_rootDirectory, keepDays, date); }
+                catch (Exception ex) { Report(ex); }
+            }
         }
 
         var name = FileNameFor(result);
@@ -193,7 +226,7 @@ public sealed class CsvLogWriter : IDisposable
         _disposed = true;
 
         _channel.Writer.TryComplete();
-        try { _worker.Wait(TimeSpan.FromSeconds(5)); } catch { }
-        CloseAll();
+        try { _worker.Wait(TimeSpan.FromSeconds(30)); } catch { }
+        // 文件句柄由唯一的后台写线程关闭；超时后不能在这里并发关闭它正在写的文件。
     }
 }

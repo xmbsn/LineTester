@@ -215,6 +215,9 @@ public sealed class RegistrarDraft
         if (!IsInRange(MaxRetriesText, 0, RegistrarConfig.MaxRetriesLimit))
             problems.Add($"最大重传次数必须是 0~{RegistrarConfig.MaxRetriesLimit} 的整数（当前填写的是“{Text(MaxRetriesText)}”）");
 
+        if (string.IsNullOrWhiteSpace(Secret))
+            problems.Add("启用注册同步必须填写预共享密钥（各节点与中心相同）");
+
         return string.Join("；", problems);
     }
 
@@ -222,7 +225,7 @@ public sealed class RegistrarDraft
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var primary = PublicHost?.Trim() ?? "";
-        if (primary.Length > 0) seen.Add(primary);
+        if (primary.Length > 0) seen.Add($"{primary}|{PublicPortText.Trim()}");
         foreach (var endpoint in EffectiveAdditionalEndpoints)
         {
             var ip = endpoint.Ip?.Trim() ?? "";
@@ -234,8 +237,8 @@ public sealed class RegistrarDraft
             var portProblem = DescribePortProblem($"外网地址 {ip} 的端口", endpoint.PortText, required);
             if (portProblem.Length > 0) problems.Add(portProblem);
 
-            if (ip.Length > 0 && !seen.Add(ip))
-                problems.Add($"外网地址 {ip} 重复；一个 IP 只能添加一次");
+            if (ip.Length > 0 && !seen.Add($"{ip}|{endpoint.PortText.Trim()}"))
+                problems.Add($"外网端点 {ip}:{endpoint.PortText} 重复");
         }
     }
 

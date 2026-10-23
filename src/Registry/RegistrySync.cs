@@ -47,15 +47,15 @@ public static class RegistrySync
             targets.Add(node);
         }
 
-        // 2) manual 链路原样保留；registry 链路按「节点 + 地址」建索引
-        //    （同一个机房可能有多个外网 IP，同一个 NodeId 会对应多条链路）
+        // 2) manual 链路原样保留；registry 链路按「节点 + IP + 端口」建索引。
+        //    同一 IP 的不同监听端口也是不同端点，必须分别保留本地停测设置。
         var result = new List<LinkConfig>(existing.Count + targets.Count);
         var currentByKey = new Dictionary<string, LinkConfig>(StringComparer.Ordinal);
 
         foreach (var link in existing)
         {
             if (link.Source == LinkSources.Registry && !string.IsNullOrEmpty(link.NodeId))
-                currentByKey[Key(link.NodeId, link.Host)] = link;
+                currentByKey[Key(link.NodeId, link.Host, link.Port)] = link;
             else
                 result.Add(link);
         }
@@ -81,7 +81,7 @@ public static class RegistrySync
                 // 主地址用节点名，其余加 #2/#3 后缀：既能在统计表里区分，又能一眼看出是同一个机房
                 var name = i == 0 ? baseName : $"{baseName}#{i + 1}";
 
-                currentByKey.TryGetValue(Key(node.NodeId, ip), out var current);
+                currentByKey.TryGetValue(Key(node.NodeId, ip, endpoint.Port), out var current);
 
                 // 本地意图：老配置只有 LocalDisabled（两个都不勾），新配置可以单独关一个协议。
                 // 迁移规则：LocalDisabled=true 视为两个协议都本地关掉。
@@ -115,7 +115,7 @@ public static class RegistrySync
                     updated++;
                 }
 
-                used.Add(Key(node.NodeId, ip));
+                used.Add(Key(node.NodeId, ip, endpoint.Port));
                 result.Add(new LinkConfig
                 {
                     Name = name,
@@ -144,7 +144,7 @@ public static class RegistrySync
         return new SyncOutcome(result, added, updated, removed, skipped);
     }
 
-    /// <summary>注册链路的身份：来源节点 + 该节点的一个外网地址。</summary>
-    public static string Key(string nodeId, string ip)
-        => $"{nodeId}|{ip?.Trim() ?? ""}";
+    /// <summary>注册链路的身份：来源节点 + 外网 IP + 监听端口。</summary>
+    public static string Key(string nodeId, string ip, int port)
+        => $"{nodeId}|{ip?.Trim() ?? ""}|{port}";
 }

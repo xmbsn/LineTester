@@ -1,0 +1,21 @@
+name: Windows build and self-test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Build
+        run: dotnet build .\src\LineTester.csproj -c Release
+      - name: Self-test
+        run: dotnet run --project .\tests\LineTester.Tests\LineTester.Tests.csproj -c Release

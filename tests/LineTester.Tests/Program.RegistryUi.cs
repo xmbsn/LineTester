@@ -55,6 +55,15 @@ internal static partial class Program
         Eq("草稿：同步周期", "300", draft.SyncText);
         Eq("草稿：节点身份随配置带入", source.NodeId, draft.NodeId);
         Check("草稿：密钥原样", draft.Secret == "s3cret");
+        var noSecret = RegistrarDraft.From(source);
+        noSecret.Secret = "";
+        Check("注册草稿拒绝空密钥", noSecret.Validate().Contains("预共享密钥"));
+
+        var sharedIp = RegistrarDraft.From(source);
+        sharedIp.AdditionalEndpoints.Add(new ExternalEndpointDraft(source.PublicHost, "9001"));
+        Eq("同 IP 不同端口可作为额外端点", "", sharedIp.Validate());
+        sharedIp.AdditionalEndpoints.Add(new ExternalEndpointDraft(source.PublicHost, "9001"));
+        Check("完全相同的 IP 与端口会被拒绝", sharedIp.Validate().Contains("重复"));
 
         var target = new RegistrarConfig();
         Check("往返：写回配置成功", draft.TryApply(target, out var roundTripError), roundTripError);
@@ -79,6 +88,7 @@ internal static partial class Program
         freshDraft.PublicPortText = "9000";
         freshDraft.CenterHost = "203.0.113.1";
         freshDraft.CenterPortText = "50000";
+        freshDraft.Secret = "first-secret";
         freshDraft.Enabled = true;
         Check("首次启用可写回", freshDraft.TryApply(fresh, out var freshError), freshError);
         Eq("首次启用自动生成 32 位节点身份", 32, fresh.NodeId.Length);
@@ -551,7 +561,7 @@ internal static partial class Program
             Check("含可被 UDP 探测开关", panel.FindName("AdvertiseUdpCheck") is CheckBox);
             Check("含立即注册按钮", panel.FindName("RegisterNowButton") is Button);
             Check("含中心节点表", panel.FindName("NodeGrid") is DataGrid);
-            Check("含外网地址列表（一机房多 IP）", panel.FindName("PublicHostsList") is ListBox);
+            Check("含外网端点表（一机房多端点）", panel.FindName("PublicEndpointsGrid") is DataGrid);
             Check("含「添加」外网地址按钮", panel.FindName("AddPublicHostButton") is Button);
             Check("含「删除所选」外网地址按钮", panel.FindName("RemovePublicHostButton") is Button);
 
@@ -576,62 +586,70 @@ internal static partial class Program
 
             Eq("界面按配置填充节点名称", "机房A", ((TextBox)panel.FindName("NodeNameBox")!).Text);
             Eq("界面按配置填充外网地址", "203.0.113.9", ((Ipv4Box)panel.FindName("PublicHostBox")!).Text);
-            Eq("单地址时列表里也有一行（标出主地址）",
-                "203.0.113.9（主）",
-                ((ListBox)panel.FindName("PublicHostsList")!).Items.Count == 1
-                    ? (string)((ListBox)panel.FindName("PublicHostsList")!).Items[0]!
-                    : "条数=" + ((ListBox)panel.FindName("PublicHostsList")!).Items.Count);
-            // ---- 一机房多 IP：列表 / 添加 / 删除 / 往返 ----
-            var hostList = (ListBox)panel.FindName("PublicHostsList")!;
+            var endpointGrid = (DataGrid)panel.FindName("PublicEndpointsGrid")!;
+            Eq("单地址时额外端点表为空", 0, endpointGrid.Items.Count);
+            // ---- 一机房多端点：IP 与端口成对编辑 / 添加 / 删除 / 往返 ----
             var multiConfig = new RegistrarConfig
             {
                 Enabled = true,
                 NodeName = "东莞机房",
                 PublicHost = "120.233.128.228",
-                PublicHosts = new List<string> { "157.255.153.208", "183.60.150.36" },
+                AdditionalEndpoints = new List<ExternalEndpoint>
+                {
+                    new() { Ip = "157.255.153.208", Port = 16298 },
+                    new() { Ip = "183.60.150.36", Port = 16299 }
+                },
                 PublicPort = 16298,
                 CenterHost = "203.0.113.1",
-                CenterPort = 16298
+                CenterPort = 16298,
+                Secret = "s3cret"
             };
 
             panel.Load(multiConfig);
-            Eq("列表显示全部 3 个地址", 3, hostList.Items.Count);
-            Eq("第一行标出主地址", "120.233.128.228（主）", (string)hostList.Items[0]!);
-            Eq("第二行是额外地址", "157.255.153.208", (string)hostList.Items[1]!);
+            Eq("额外端点表显示两行", 2, endpointGrid.Items.Count);
+            Eq("第一行额外端点 IP", "157.255.153.208", ((ExternalEndpointDraft)endpointGrid.Items[0]!).Ip);
+            Eq("第二行端口独立保存", "16299", ((ExternalEndpointDraft)endpointGrid.Items[1]!).PortText);
 
             var multiTarget = new RegistrarConfig();
             Check("多地址配置可读回", panel.TryReadInto(multiTarget, out var multiError), multiError);
             Eq("读回：主地址", "120.233.128.228", multiTarget.PublicHost);
             Eq("读回：其余地址", "157.255.153.208,183.60.150.36", string.Join(",", multiTarget.PublicHosts));
+            Eq("读回：各端点独立端口", "16298,16299", string.Join(",", multiTarget.AdditionalEndpoints.Select(e => e.Port)));
 
             var pickAlerts = new List<string>();
             panel.Alert = (message, _) => pickAlerts.Add(message);
 
-            ((Ipv4Box)panel.FindName("PublicHostBox")!).Text = "221.5.88.88";
             ((Button)panel.FindName("AddPublicHostButton")!).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            Eq("添加后列表 4 个", 4, hostList.Items.Count);
+            Eq("添加后额外端点表有三行", 3, endpointGrid.Items.Count);
+            ((ExternalEndpointDraft)endpointGrid.Items[2]!).Ip = "221.5.88.88";
+            ((ExternalEndpointDraft)endpointGrid.Items[2]!).PortText = "16300";
 
             ((Button)panel.FindName("AddPublicHostButton")!).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            Eq("重复添加被拦下（仍是 4 个）", 4, hostList.Items.Count);
-            Check("重复添加给出提示", pickAlerts.Any(a => a.Contains("已经在列表里")), string.Join(" / ", pickAlerts));
+            ((ExternalEndpointDraft)endpointGrid.Items[3]!).Ip = "221.5.88.88";
+            ((ExternalEndpointDraft)endpointGrid.Items[3]!).PortText = "16300";
+            Check("重复 IP 与端口被拦下", !panel.TryReadInto(new RegistrarConfig(), out var duplicateError) &&
+                duplicateError.Contains("重复"), duplicateError);
+            ((ExternalEndpointDraft)endpointGrid.Items[3]!).PortText = "16301";
+            Check("相同 IP 不同端口允许", panel.TryReadInto(new RegistrarConfig(), out var differentPortError), differentPortError);
+            endpointGrid.SelectedItem = endpointGrid.Items[3];
+            ((Button)panel.FindName("RemovePublicHostButton")!).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
 
             var afterAdd = new RegistrarConfig();
             Check("添加后可读回", panel.TryReadInto(afterAdd, out var addError), addError);
             Eq("读回包含新地址", "157.255.153.208,183.60.150.36,221.5.88.88",
                 string.Join(",", afterAdd.PublicHosts));
 
-            hostList.SelectedItems.Clear();
-            hostList.SelectedItems.Add(hostList.Items[1]!);
+            endpointGrid.SelectedItem = endpointGrid.Items[0];
             ((Button)panel.FindName("RemovePublicHostButton")!).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            Eq("删除后列表 3 个", 3, hostList.Items.Count);
+            Eq("删除后额外端点表有两行", 2, endpointGrid.Items.Count);
 
             var afterRemove = new RegistrarConfig();
             Check("删除后可读回", panel.TryReadInto(afterRemove, out var removeError), removeError);
             Eq("被删的地址不再出现", "183.60.150.36,221.5.88.88", string.Join(",", afterRemove.PublicHosts));
             Check("主地址仍是第一个", afterRemove.PublicHost == "120.233.128.228", afterRemove.PublicHost);
 
-            hostList.SelectedItems.Clear();
-            foreach (var item in hostList.Items.Cast<object>().ToList()) hostList.SelectedItems.Add(item);
+            endpointGrid.SelectedItems.Clear();
+            foreach (var item in endpointGrid.Items.Cast<object>().ToList()) endpointGrid.SelectedItems.Add(item);
             ((Button)panel.FindName("RemovePublicHostButton")!).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             ((Ipv4Box)panel.FindName("PublicHostBox")!).Text = "";
             Check("地址全部清空后被拦下",
@@ -1637,7 +1655,7 @@ internal static partial class Program
         Check("中心日志记录了全部 3 个地址",
             centerLogText.Contains("120.233.128.228") && centerLogText.Contains("157.255.153.208") &&
             centerLogText.Contains("183.60.150.36"), centerLogText);
-        Check("中心日志记录了节点名与端口", centerLogText.Contains("东莞机房") && centerLogText.Contains("port=16298"));
+        Check("中心日志记录了节点名与端口", centerLogText.Contains("东莞机房") && centerLogText.Contains("120.233.128.228:16298"));
         Check("中心日志记录了 rev 变化与清单规模",
             centerLogText.Contains("rev 0→1") && centerLogText.Contains("清单 1 个节点"), centerLogText);
         Check("中心日志**不含密钥**", !centerLogText.Contains("secret-should-never-appear"));
@@ -2267,7 +2285,7 @@ internal static partial class Program
         {
             ListenPort = 8800,
             Links = { new LinkConfig { Name = "本机", Host = "127.0.0.1", Port = 9001 } },
-            Registrar = new RegistrarConfig { Enabled = true, NodeName = "机房A", NodeId = "self-node", PublicHost = "203.0.113.9", PublicPort = 8800, CenterHost = "203.0.113.1", CenterPort = 16298 }
+            Registrar = new RegistrarConfig { Enabled = true, NodeName = "机房A", NodeId = "self-node", PublicHost = "203.0.113.9", PublicPort = 8800, CenterHost = "203.0.113.1", CenterPort = 16298, Secret = "test-secret" }
         });
 
         RunOnSta(() =>

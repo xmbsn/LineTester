@@ -137,6 +137,10 @@ public static class ConfigManager
             problems.Add("IntervalMs 不能小于 50");
         if (config.TimeoutMs < 1)
             problems.Add("TimeoutMs 必须大于 0");
+        if (config.MaxConcurrentProbes is < 1 or > 1024)
+            problems.Add("MaxConcurrentProbes 必须在 1~1024 之间");
+        if (config.LogRetentionDays is < 0 or > 3650)
+            problems.Add("LogRetentionDays 必须在 0~3650 之间（0 表示永久保留）");
         if (config.StreamPacketMinBytes < StreamPacket.MinBytes || config.StreamPacketMinBytes > StreamPacket.MaxBytes)
             problems.Add($"StreamPacketMinBytes 必须在 {StreamPacket.MinBytes}~{StreamPacket.MaxBytes} 之间");
         if (config.StreamPacketMaxBytes < StreamPacket.MinBytes || config.StreamPacketMaxBytes > StreamPacket.MaxBytes)
@@ -249,6 +253,8 @@ public static class ConfigManager
             problems.Add("Registrar.CenterHost 不能为空");
         if (registrar.CenterPort < 1 || registrar.CenterPort > 65535)
             problems.Add($"Registrar.CenterPort 必须在 1~65535 之间（当前是 {registrar.CenterPort}）");
+        if (string.IsNullOrWhiteSpace(registrar.Secret))
+            problems.Add("Registrar.Secret 不能为空：启用注册同步必须配置相同的预共享密钥");
 
         if (registrar.HeartbeatSeconds < RegistrarConfig.MinIntervalSeconds ||
             registrar.HeartbeatSeconds > RegistrarConfig.MaxIntervalSeconds)

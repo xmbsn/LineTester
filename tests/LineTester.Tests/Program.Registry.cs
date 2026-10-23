@@ -462,6 +462,34 @@ internal static partial class Program
         Eq("回环地址节点不生成链路", 0, loopOnly.Added);
         Eq("仍只有手工链路", 1, loopOnly.Links.Count);
         Check("无可分发目标时不算有变化", !loopOnly.HasChanges);
+
+        // 一个公网 IP 可映射多个监听端口；端口必须参与身份匹配。
+        var sameIpPorts = new List<NodeSnapshot>
+        {
+            new()
+            {
+                NodeId = "multi", Name = "多端口节点", Ip = "203.0.113.60", Port = 50060,
+                Tcp = true, Udp = true,
+                Endpoints = new List<ExternalEndpoint>
+                {
+                    new() { Ip = "203.0.113.60", Port = 50060 },
+                    new() { Ip = "203.0.113.60", Port = 50061 }
+                }
+            }
+        };
+        var multi = RegistrySync.Apply(sameIpPorts, localNodeId, Array.Empty<LinkConfig>());
+        Eq("同 IP 不同端口新增两条链路", 2, multi.Added);
+        Eq("同 IP 不同端口都保留", 2, multi.Links.Select(l => l.Port).Distinct().Count());
+        multi.Links.Single(l => l.Port == 50060).LocalTcpOff = true;
+        var multiAgain = RegistrySync.Apply(sameIpPorts, localNodeId, multi.Links);
+        Eq("多端口快照重复同步不新增", 0, multiAgain.Added);
+        Eq("多端口快照重复同步不删除", 0, multiAgain.Removed);
+        Check("本地关 TCP 只作用于对应端口", !multiAgain.Links.Single(l => l.Port == 50060).Tcp &&
+              multiAgain.Links.Single(l => l.Port == 50061).Tcp);
+        sameIpPorts[0].Endpoints!.RemoveAt(0);
+        var onePort = RegistrySync.Apply(sameIpPorts, localNodeId, multiAgain.Links);
+        Eq("撤销一个端口只删除对应链路", 1, onePort.Removed);
+        Eq("剩余端口仍在", 50061, onePort.Links.Single().Port);
     }
 
     // ---------------- 中心服务（认证/幂等/限流/分块） ----------------

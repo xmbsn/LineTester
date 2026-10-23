@@ -17,7 +17,7 @@ public interface IIspFetcher
 /// ① **15 次/分钟**，超了会 429，持续超会封 1 小时 → 因此必须批量（一次最多 100 个 IP）+ 落盘缓存；
 /// ② 响应头 <c>X-Rl</c>（本窗口剩余次数）与 <c>X-Ttl</c>（重置秒数）必须读：
 ///    <c>X-Rl=0</c> 时**不能再发请求**，否则就是主动把自己封掉；
-/// ③ 免费版只有 HTTP（明文），官方声明不允许商用 —— 因此界面上给了开关，默认开启但可关闭。
+/// ③ 免费版只有 HTTP（明文），官方声明不允许商用 —— 因此界面上给了开关，默认关闭。
 /// </summary>
 public sealed class IspApiFetcher : IIspFetcher, IDisposable
 {

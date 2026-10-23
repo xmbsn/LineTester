@@ -10,6 +10,12 @@ public sealed class AppConfig
     public int IntervalMs { get; set; } = 1000;
     public int TimeoutMs { get; set; } = 1000;
 
+    /// <summary>每轮同时在途的探测上限，避免链路多时瞬间打开过多套接字。</summary>
+    public int MaxConcurrentProbes { get; set; } = 64;
+
+    /// <summary>保留最近多少个自然日的日志；0（默认）表示不自动删除。</summary>
+    public int LogRetentionDays { get; set; }
+
     /// <summary>
     /// TCP/UDP 每次探测的串流模拟包总长度范围（含关联头与模拟媒体负载）。
     /// 默认 900~1200B，接近为公网 MTU 留余量的实时音视频分片。
@@ -46,7 +52,7 @@ public sealed class AppConfig
     /// <summary>链路注册与同步（多机房自动互测）配置。默认不启用，行为与升级前完全一致。</summary>
     public RegistrarConfig Registrar { get; set; } = new();
 
-    /// <summary>运营商信息查询（ip-api）。默认开启；关掉后不做任何联网查询，表格该列显示"未启用"。</summary>
+    /// <summary>运营商信息查询（ip-api）。默认关闭；启用后才向配置的接口发送公网地址。</summary>
     public IspConfig Isp { get; set; } = new();
 
     public static AppConfig Default() => new()
@@ -61,12 +67,12 @@ public sealed class AppConfig
 /// <summary>
 /// 运营商信息查询配置（用于判断"是否跨运营商测试"）。
 ///
-/// 默认开启，但**可以关掉**：免费接口只支持 HTTP 明文、且官方声明不允许商用，
-/// 关掉之后程序一个字节都不会往外发，表格对应列显示"未启用"。
+/// 默认关闭：免费接口只支持 HTTP 明文、且官方声明不允许商用。
+/// 用户明确启用之后才联网查询，表格默认显示"未启用"。
 /// </summary>
 public sealed class IspConfig
 {
-    public bool Enabled { get; set; } = true;
+    public bool Enabled { get; set; }
 
     /// <summary>批量查询地址（换成自建代理时改这里）。</summary>
     public string Endpoint { get; set; } = "http://ip-api.com/batch";
@@ -159,7 +165,7 @@ public sealed class RegistrarConfig
 
     public int CenterPort { get; set; }
 
-    /// <summary>预共享密钥（HMAC）。为空时仍可注册，但清单会标记 unauthenticated。</summary>
+    /// <summary>预共享密钥（HMAC）。启用注册时必须填写。</summary>
     public string Secret { get; set; } = "";
 
     /// <summary>心跳注册周期（秒）：保活，也是中心判活的依据。</summary>

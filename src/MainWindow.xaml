@@ -288,7 +288,7 @@
                     </Grid.ColumnDefinitions>
                     <CheckBox Grid.Column="0" x:Name="IspCheck"
                               Style="{StaticResource FieldCheck}" Margin="0"
-                              HorizontalAlignment="Left" IsChecked="True"
+                              HorizontalAlignment="Left" IsChecked="False"
                               Checked="IspCheck_Changed" Unchecked="IspCheck_Changed"
                               Content="显示运营商信息并判断是否跨运营商（联网查询 ip-api.com，可关闭）"
                               ToolTip="查本端出口 IP 与目标地址的运营商：同运营商=绿灯、跨运营商=红灯、数据不足=灰灯。免费接口只支持 HTTP 明文、15 次/分钟，因此结果会缓存（默认 30 天）且只查公网地址；取消勾选后程序一个字节都不会往外发。"/>
@@ -532,7 +532,7 @@
                         <Button x:Name="CheckConfigButton" Content="核对配置文件" Click="CheckConfig_Click" Margin="0,0,8,0"
                                 ToolTip="把配置文件里的链路与界面上的行逐条对比：文件里有几条、界面有几条、差在哪——用来判断“文件里有、界面里没有”是不是读错了文件或被外部改过"/>
                         <TextBlock VerticalAlignment="Center" Margin="8,0,0,0" Foreground="#5F6368"
-                                   Text="链路改动在点“启动测试”后生效（不会影响历史日志）"/>
+                                   Text="链路改动约 1 秒后生效（不会影响历史日志）"/>
                     </StackPanel>
 
                     <DataGrid x:Name="LinksGrid" Grid.Row="1" IsReadOnly="False"
@@ -621,7 +621,7 @@
                     「连接被拒绝（端口无监听）」表示网络路径是通的、只是该端口没有程序在监听；UDP 收到 ICMP 则会显示「UDP 端口不可达（收到 ICMP）」。逐条记在 CSV 的 failure 列。
                     <LineBreak/>
                     链路历史日志按天分目录保存：<Bold>logs\YYYY-MM-DD\&lt;链路&gt;_&lt;IP&gt;_&lt;端口&gt;.csv</Bold>（跨零点自动换新目录，同一天内追加）。
-                    重启测试不会删除历史日志，工具也不会自动清理日志（需要按天数保留可以配置）。
+                    重启测试不会删除历史日志；可在配置中设置 LogRetentionDays，默认 0 表示永久保留。
                 </TextBlock>
             </Border>
         </Expander>

@@ -12,6 +12,8 @@ namespace LineTester;
 /// </summary>
 public sealed class PassiveUdpAuditLog : IDisposable
 {
+    public const int MaxPendingRecords = 65536;
+    private const int MaxWriteBatch = 1024;
     public const string FileName = "udp-passive-audit.csv";
     public const string Header = "timestamp,remote_endpoint,seq,probe_id,received,reply_sent,error";
 
@@ -19,7 +21,10 @@ public sealed class PassiveUdpAuditLog : IDisposable
     private readonly Channel<Record> _channel;
     private readonly Task _worker;
     private readonly Dictionary<string, StreamWriter> _writers = new(StringComparer.OrdinalIgnoreCase);
+    private string _activeDay = "";
     private int _pendingCount;
+    private long _droppedCount;
+    private long _failedWrites;
     private bool _disposed;
 
     private sealed record Record(DateTime Timestamp, string RemoteEndpoint, string Seq, string ProbeId, bool ReplySent, string Error);
@@ -27,18 +32,28 @@ public sealed class PassiveUdpAuditLog : IDisposable
     public PassiveUdpAuditLog(string rootDirectory)
     {
         _rootDirectory = rootDirectory;
-        _channel = Channel.CreateUnbounded<Record>(new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+        _channel = Channel.CreateBounded<Record>(new BoundedChannelOptions(MaxPendingRecords)
+        {
+            SingleReader = true, SingleWriter = false, FullMode = BoundedChannelFullMode.Wait
+        });
         _worker = Task.Run(WorkerLoopAsync);
     }
 
     public string CurrentPath => Path.Combine(_rootDirectory, CsvLogWriter.FolderNameFor(DateTime.Now), FileName);
+
+    public long DroppedCount => Interlocked.Read(ref _droppedCount);
+    public long FailedWrites => Interlocked.Read(ref _failedWrites);
 
     public void Enqueue(DateTime timestamp, string remoteEndpoint, long? seq, string? probeId, bool replySent, string? error = null)
     {
         if (_disposed) return;
         var record = new Record(timestamp, remoteEndpoint, seq?.ToString() ?? "", probeId ?? "", replySent, error ?? "");
         Interlocked.Increment(ref _pendingCount);
-        if (!_channel.Writer.TryWrite(record)) Interlocked.Decrement(ref _pendingCount);
+        if (!_channel.Writer.TryWrite(record))
+        {
+            Interlocked.Decrement(ref _pendingCount);
+            Interlocked.Increment(ref _droppedCount);
+        }
     }
 
     /// <summary>供自检确认后台审计已经真正落盘。</summary>
@@ -61,12 +76,12 @@ public sealed class PassiveUdpAuditLog : IDisposable
             while (await _channel.Reader.WaitToReadAsync().ConfigureAwait(false))
             {
                 var batch = new List<Record>();
-                while (_channel.Reader.TryRead(out var record)) batch.Add(record);
+                while (batch.Count < MaxWriteBatch && _channel.Reader.TryRead(out var record)) batch.Add(record);
 
                 foreach (var record in batch)
                 {
                     try { Write(record); }
-                    catch { /* 审计失败不得影响监听/回包 */ }
+                    catch { Interlocked.Increment(ref _failedWrites); /* 审计失败不得影响监听/回包 */ }
                 }
 
                 FlushAll();
@@ -83,6 +98,12 @@ public sealed class PassiveUdpAuditLog : IDisposable
     private void Write(Record record)
     {
         var day = CsvLogWriter.FolderNameFor(record.Timestamp);
+        if (day != _activeDay)
+        {
+            FlushAll();
+            CloseAll();
+            _activeDay = day;
+        }
         if (!_writers.TryGetValue(day, out var writer))
         {
             var directory = Path.Combine(_rootDirectory, day);
@@ -105,7 +126,7 @@ public sealed class PassiveUdpAuditLog : IDisposable
     {
         foreach (var writer in _writers.Values)
         {
-            try { writer.Flush(); } catch { }
+            try { writer.Flush(); } catch { Interlocked.Increment(ref _failedWrites); }
         }
     }
 

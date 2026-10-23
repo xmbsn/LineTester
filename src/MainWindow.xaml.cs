@@ -42,6 +42,9 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<ProbeResult> _anomalies = new();
     private readonly ObservableCollection<ProbeResult> _trend = new();
     private readonly ConcurrentQueue<ProbeResult> _pending = new();
+    private const int MaxPendingUiResults = 50000;
+    private int _pendingUiCount;
+    private long _droppedUiDetails;
 
     /// <summary>链路编辑器里的行（界面上可直接增删改）。</summary>
     private readonly ObservableCollection<LinkRow> _linkRows = new();
@@ -244,6 +247,7 @@ public partial class MainWindow : Window
     private void LoadConfigFromDisk(bool showError)
     {
         _settings = ConfigManager.Load(out var error);
+        _log.ConfigureRetention(error is null ? _settings.LogRetentionDays : 0);
         _configLoadError = error;
         _configStamp = ConfigManager.Stamp();
 
@@ -607,7 +611,7 @@ public partial class MainWindow : Window
         AddLinkRow(row);
         RevalidateLinks();
         SelectAndFocus(row);
-        UpdateStatus("已新增一条链路，请填写名称与主机/IP（点“启动测试”后生效）");
+        UpdateStatus("已新增一条链路，请填写名称与主机/IP（校验通过后约 1 秒生效）");
         _configLog.Write($"新增链路：「{row.Name}」{row.Target}");
     }
 
@@ -629,7 +633,7 @@ public partial class MainWindow : Window
 
         RevalidateLinks();
         if (last is not null) SelectAndFocus(last);
-        UpdateStatus($"已复制 {selected.Count} 条链路（点“启动测试”后生效）");
+        UpdateStatus($"已复制 {selected.Count} 条链路（校验通过后约 1 秒生效）");
     }
 
     private void DeleteLink_Click(object sender, RoutedEventArgs e)
@@ -675,7 +679,7 @@ public partial class MainWindow : Window
 
         UpdateUndoButton();
         RevalidateLinks();
-        UpdateStatus($"已删除 {selected.Count} 条链路（可点“撤销删除”恢复；点“启动测试”后生效）");
+        UpdateStatus($"已删除 {selected.Count} 条链路（可点“撤销删除”恢复；约 1 秒后生效）");
     }
 
     private void UndoDelete_Click(object sender, RoutedEventArgs e)
@@ -692,7 +696,7 @@ public partial class MainWindow : Window
         _lastDeleted.Clear();
         UpdateUndoButton();
         RevalidateLinks();
-        UpdateStatus($"已恢复 {count} 条被删除的链路（点“启动测试”后生效）");
+        UpdateStatus($"已恢复 {count} 条被删除的链路（约 1 秒后生效）");
         _configLog.Write($"撤销删除：恢复 {count} 条链路");
     }
 
@@ -1003,6 +1007,8 @@ public partial class MainWindow : Window
         if (MainTabs.SelectedItem == ChartTab) ChartPanel.Update(_chartHistory.SelectedSeries, _settings.WarningRttMs, _chartHistory.RecordedCount);
 
         while (_pending.TryDequeue(out _)) { }
+        _pendingUiCount = 0;
+        _droppedUiDetails = 0;
     }
 
     private void StopProbeEngine()
@@ -1356,11 +1362,11 @@ public partial class MainWindow : Window
         ApplyGlobalProtocolsToRows();
     }
 
-    /// <summary>注册链路的身份：来源节点 + 该链路指向的地址（一个机房多 IP 时靠它区分）。</summary>
-    private static string LinkSourceKey(LinkConfig link) => RegistrySync.Key(link.NodeId, link.Host);
+    /// <summary>注册链路的身份：来源节点 + IP + 端口。</summary>
+    private static string LinkSourceKey(LinkConfig link) => RegistrySync.Key(link.NodeId, link.Host, link.Port);
 
     /// <summary>同上，供界面行使用（行与配置必须用同一套身份，否则会互相错配）。</summary>
-    private static string LinkSourceKey(LinkRow row) => RegistrySync.Key(row.NodeId, row.Host);
+    private static string LinkSourceKey(LinkRow row) => RegistrySync.Key(row.NodeId, row.Host, row.Port);
 
     /// <summary>
     /// 注册同步触发的自动落盘：不弹模态框。
@@ -1628,40 +1634,46 @@ public partial class MainWindow : Window
             var sendUdp = _liveUdp;
             var sendIcmp = _liveIcmp;
 
-            var tasks = new List<Task<ProbeResult?>>(links.Length * 3);
+            var tasks = new List<Task<ProbeResult?>>(_settings.MaxConcurrentProbes);
             foreach (var link in links)
             {
-                if (sendTcp && link.Tcp) tasks.Add(_client.ProbeAsync(link, ProbeClient.ProtocolTcp, timeout, ct,
-                    _settings.StreamPacketMinBytes, _settings.StreamPacketMaxBytes));
-                if (sendUdp && link.Udp) tasks.Add(_client.ProbeAsync(link, ProbeClient.ProtocolUdp, timeout, ct,
-                    _settings.StreamPacketMinBytes, _settings.StreamPacketMaxBytes));
-                if (sendIcmp && link.Icmp) tasks.Add(_client.ProbeAsync(link, ProbeClient.ProtocolIcmp, timeout, ct));
+                if (sendTcp && link.Tcp)
+                {
+                    if (tasks.Count >= _settings.MaxConcurrentProbes)
+                    {
+                        await DispatchProbeBatchAsync(tasks, epoch, ct).ConfigureAwait(false);
+                        tasks.Clear();
+                    }
+                    if (ct.IsCancellationRequested) break;
+                    tasks.Add(_client.ProbeAsync(link, ProbeClient.ProtocolTcp, timeout, ct,
+                        _settings.StreamPacketMinBytes, _settings.StreamPacketMaxBytes));
+                }
+                if (sendUdp && link.Udp)
+                {
+                    if (tasks.Count >= _settings.MaxConcurrentProbes)
+                    {
+                        await DispatchProbeBatchAsync(tasks, epoch, ct).ConfigureAwait(false);
+                        tasks.Clear();
+                    }
+                    if (ct.IsCancellationRequested) break;
+                    tasks.Add(_client.ProbeAsync(link, ProbeClient.ProtocolUdp, timeout, ct,
+                        _settings.StreamPacketMinBytes, _settings.StreamPacketMaxBytes));
+                }
+                if (sendIcmp && link.Icmp)
+                {
+                    if (tasks.Count >= _settings.MaxConcurrentProbes)
+                    {
+                        await DispatchProbeBatchAsync(tasks, epoch, ct).ConfigureAwait(false);
+                        tasks.Clear();
+                    }
+                    if (ct.IsCancellationRequested) break;
+                    tasks.Add(_client.ProbeAsync(link, ProbeClient.ProtocolIcmp, timeout, ct));
+                }
             }
 
-            if (tasks.Count > 0)
-            {
-                ProbeResult?[] results;
-                try
-                {
-                    results = await Task.WhenAll(tasks).ConfigureAwait(false);
-                }
-                catch (Exception)
-                {
-                    results = Array.Empty<ProbeResult?>();
-                }
-
-                if (ct.IsCancellationRequested) break;
-
-                var accepted = new List<ProbeResult>(results.Length);
-                foreach (var result in results)
-                {
-                    if (result is null) continue; // 用户取消，不是丢包
-                    result.Epoch = epoch;
-                    accepted.Add(result);
-                }
-
-                if (accepted.Count > 0) DispatchResults(accepted);
-            }
+            if (ct.IsCancellationRequested) break;
+            if (tasks.Count > 0) await DispatchProbeBatchAsync(tasks, epoch, ct).ConfigureAwait(false);
+            if (ct.IsCancellationRequested) break;
 
             // 按“轮次起点”计时，扣除探测本身的耗时，避免实际间隔越跑越长
             var wait = interval - (int)roundStart.ElapsedMilliseconds;
@@ -1678,20 +1690,42 @@ public partial class MainWindow : Window
         }
     }
 
-    private void DispatchResults(List<ProbeResult> results)
+    private async Task DispatchProbeBatchAsync(List<Task<ProbeResult?>> tasks, long epoch, CancellationToken ct)
     {
-        Dispatcher.InvokeAsync(() =>
+        ProbeResult?[] results;
+        try { results = await Task.WhenAll(tasks).ConfigureAwait(false); }
+        catch (Exception) { return; }
+
+        if (ct.IsCancellationRequested) return;
+        var accepted = new List<ProbeResult>(results.Length);
+        foreach (var result in results)
         {
-            foreach (var result in results)
+            if (result is null) continue; // 用户取消，不是丢包
+            result.Epoch = epoch;
+            accepted.Add(result);
+        }
+
+        if (accepted.Count == 0) return;
+
+        // 等界面消费完上一批再启动后续探测，防止 UI 停顿时调度队列持续堆积。
+        await Dispatcher.InvokeAsync(() =>
+        {
+            foreach (var result in accepted)
             {
                 // 清除/重启之前发起、之后才返回的结果：不计入统计，也不写日志
                 if (!_session.Accept(result.Epoch)) continue;
 
                 _session.Add(result);
                 _log.Enqueue(result);
+                if (_pendingUiCount >= MaxPendingUiResults && _pending.TryDequeue(out _))
+                {
+                    _pendingUiCount--;
+                    _droppedUiDetails++;
+                }
                 _pending.Enqueue(result);
+                _pendingUiCount++;
             }
-        });
+        }).Task.ConfigureAwait(false);
     }
 
     // ---------------- 界面刷新（节流） ----------------
@@ -1928,6 +1962,7 @@ public partial class MainWindow : Window
 
         while (_pending.TryDequeue(out var result))
         {
+            _pendingUiCount--;
             if (result.Epoch == epoch) batch.Add(result);
         }
 
@@ -2077,6 +2112,20 @@ public partial class MainWindow : Window
         var note = _statusNote;
         if (_configLoadError is not null)
             note = "⚠ 配置文件读取失败，未自动保存" + (note is null ? "" : " | " + note);
+
+        var droppedLogs = _log.DroppedCount;
+        var droppedAudit = _server?.UdpAuditDroppedCount ?? 0;
+        var failedAudit = _server?.UdpAuditFailedWrites ?? 0;
+        if (droppedLogs > 0 || droppedAudit > 0 || failedAudit > 0)
+        {
+            var warning = $"⚠ 日志异常：主动结果丢弃 {droppedLogs} 条、被动 UDP 审计丢弃 {droppedAudit} 条、写入失败 {failedAudit} 次";
+            note = string.IsNullOrEmpty(note) ? warning : note + " | " + warning;
+        }
+        if (_droppedUiDetails > 0)
+        {
+            var warning = $"界面明细缓冲区已略过 {_droppedUiDetails} 条旧记录（统计与 CSV 不受影响）";
+            note = string.IsNullOrEmpty(note) ? warning : note + " | " + warning;
+        }
 
         // 注册状态一行（未启用注册时 DescribeConnection 返回 null，状态栏与升级前完全一致）
         var registry = RegistryUiText.DescribeConnection(_registryClient?.Status, _settings.Registrar, DateTime.UtcNow);

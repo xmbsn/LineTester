@@ -13,8 +13,12 @@ namespace LineTester;
 /// </summary>
 public sealed class ProbeServer : IDisposable
 {
+    public const int MaxConcurrentTcpClients = 128;
+    public static readonly TimeSpan TcpClientTimeout = TimeSpan.FromSeconds(10);
+
     private readonly int _port;
     private readonly PassiveUdpAuditLog? _udpAudit;
+    private readonly SemaphoreSlim _tcpSlots = new(MaxConcurrentTcpClients);
     private TcpListener? _tcp;
     private UdpClient? _udp;
     private CancellationTokenSource? _cts;
@@ -34,6 +38,9 @@ public sealed class ProbeServer : IDisposable
 
     /// <summary>被动 UDP 审计当天文件；未启用审计时为空。</summary>
     public string? UdpAuditPath => _udpAudit?.CurrentPath;
+
+    public long UdpAuditDroppedCount => _udpAudit?.DroppedCount ?? 0;
+    public long UdpAuditFailedWrites => _udpAudit?.FailedWrites ?? 0;
 
     /// <summary>供自检等待异步审计真正落盘；未启用时视为已经完成。</summary>
     public Task<bool> WaitForUdpAuditIdleAsync(TimeSpan timeout)
@@ -128,11 +135,31 @@ public sealed class ProbeServer : IDisposable
             try
             {
                 var client = await _tcp!.AcceptTcpClientAsync(ct).ConfigureAwait(false);
-                _ = HandleTcp(client, ct);
+                if (!_tcpSlots.Wait(0))
+                {
+                    client.Dispose();
+                    continue;
+                }
+                _ = HandleTcpWithSlot(client, ct);
             }
             catch (OperationCanceledException) { break; }
             catch (ObjectDisposedException) { break; }
             catch { if (!ct.IsCancellationRequested) await SafeDelay(ct).ConfigureAwait(false); }
+        }
+    }
+
+    private async Task HandleTcpWithSlot(TcpClient client, CancellationToken serverToken)
+    {
+        try
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(serverToken);
+            deadline.CancelAfter(TcpClientTimeout);
+            await HandleTcp(client, deadline.Token).ConfigureAwait(false);
+        }
+        catch { client.Dispose(); }
+        finally
+        {
+            _tcpSlots.Release();
         }
     }
 

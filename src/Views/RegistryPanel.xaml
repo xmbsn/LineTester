@@ -248,7 +248,7 @@
                         <Grid Grid.Row="1" Grid.Column="1">
                             <PasswordBox x:Name="SecretBox" Height="26" Padding="6,0" VerticalContentAlignment="Center"
                                          BorderBrush="#DADCE0" Width="200" HorizontalAlignment="Left"
-                                         ToolTip="两端必须一致；为空时仍可注册，但清单会标记为“无密钥”"/>
+                                         ToolTip="启用注册同步时必须填写；各节点与中心必须一致"/>
                             <TextBox x:Name="SecretTextBox" Height="26" Padding="6,0" VerticalContentAlignment="Center"
                                      BorderBrush="#DADCE0" Width="200" HorizontalAlignment="Left"
                                      Visibility="Collapsed"/>

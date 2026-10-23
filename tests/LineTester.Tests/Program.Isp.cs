@@ -368,7 +368,7 @@ internal static partial class Program
                 Check("统计表含「跨网」列", statsGrid.Columns.Any(c => Equals(c.Header, "跨网")));
                 Check("统计表含「本端出口（运营商）」列",
                     statsGrid.Columns.Any(c => Equals(c.Header, "本端出口（运营商）")));
-                Check("运营商开关默认勾选（可按需关闭）",
+                Check("运营商开关按已启用的配置勾选（可按需关闭）",
                     window.FindName("IspCheck") is CheckBox { IsChecked: true });
 
                 // 现场反馈：统计表首先看**测试结果**，运营商信息放最后。
@@ -747,7 +747,8 @@ internal static partial class Program
         }
         """, new System.Text.UTF8Encoding(false));
 
-        var mixedStore = new IspCacheStore(mixedPath, TimeSpan.FromDays(30));
+        // 此处只测缓存形状和内容，使用宽 TTL 避免固定样例日期随时间过期。
+        var mixedStore = new IspCacheStore(mixedPath, TimeSpan.FromDays(3650));
         Eq("只留下可信的两条（坏记录与空白 success 被丢弃）", 2, mixedStore.Count);
         Check("「无数据」记录被丢弃", !mixedStore.TryGet("115.231.111.101", out _));
         Check("空的 success 记录被丢弃", !mixedStore.TryGet("202.96.209.133", out _));
